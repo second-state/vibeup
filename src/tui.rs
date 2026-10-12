@@ -1036,7 +1036,8 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                             }
                         }
                         RowAction::Edit(_) => {
-                            t.editing = Some((t.sel, Input::default()));
+                            // 预填当前值:方便只改一部分。
+                            t.editing = Some((t.sel, Input::with_str(&t.rows[t.sel].value)));
                             message = "editing — Enter save · Esc cancel".into();
                         }
                         RowAction::Popup(spec) => {
