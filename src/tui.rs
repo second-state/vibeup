@@ -1,22 +1,25 @@
 //! `vibeup tui` —— 三个标签:**键盘** / **手表**(BLE 设备配置)+ **管理**
 //! (vibetty / vibekeys 的安装更新)。
 //!
-//! Tab 或 1/2/3 切标签;设备页是「CONFIG 摘要 + 动作菜单」,需要参数的动作进入
-//! 逐项输入(底部一行,Enter 提交、Esc 取消)。BLE 和安装动作都是同步阻塞的,
-//! 执行时先退出 TUI 模式让输出打到正常屏幕,结束后再回来(见 `suspend`);
-//! 设备配置直接复用 `config_cmd` 的函数,每条动作自成一次 BLE 会话。
+//! Tab 或 1/2/3 切标签。设备页按功能分节(server / wifi / asr / …),每节只有一条
+//! 上边框带节名;每行是「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框
+//! (Enter 提交、Esc 取消),立即执行的项(如 reset)直接跑。
+//! BLE 和安装动作都是同步阻塞的,执行时先退出 TUI 模式让输出打到正常屏幕,
+//! 结束后再回来(见 `suspend`);设备配置复用 `config_cmd` 的函数,demo 模式
+//! 改内存假数据。
 
 use crate::config_cmd::{self, WifiAction};
 use crate::install;
 use crate::pkg::{self, PKGS, Pkg};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Cell, Paragraph, Row as TRow, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 // ===== 管理标签(包)=====
 
@@ -77,234 +80,8 @@ fn fetch(entries: &mut [Entry], dir: &std::path::Path) {
 
 // ===== 设备标签 =====
 
-/// 一个设备动作:label 显示;prompts 非空则先进逐项输入,收齐后交给 run。
-/// 动作闭包类型:收齐的答案 → 执行(自己开一次 BLE 会话)。
-type ActionFn = Box<dyn Fn(&[String]) -> Result<()>>;
-
-struct Action {
-    label: &'static str,
-    prompts: Vec<&'static str>,
-    run: ActionFn,
-}
-
-impl Action {
-    fn imm(label: &'static str, run: impl Fn(&[String]) -> Result<()> + 'static) -> Self {
-        Self {
-            label,
-            prompts: vec![],
-            run: Box::new(run),
-        }
-    }
-
-    fn ask(
-        label: &'static str,
-        prompts: &[&'static str],
-        run: impl Fn(&[String]) -> Result<()> + 'static,
-    ) -> Self {
-        Self {
-            label,
-            prompts: prompts.to_vec(),
-            run: Box::new(run),
-        }
-    }
-}
-
-fn device_actions(kind: crate::ble::DeviceKind, demo: bool, mock: Mock) -> Vec<Action> {
-    use crate::ble::DeviceKind;
-    let keys = kind == DeviceKind::VibeKeys;
-    let mut v: Vec<Action> = Vec::new();
-    let origin = mock;
-
-    let mock = origin.clone();
-    v.push(Action::imm("wifi: show list", move |_| {
-        if demo {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
-            );
-            return Ok(());
-        }
-        config_cmd::wifi(kind, WifiAction::Show, false)
-    }));
-
-    let mock = origin.clone();
-    v.push(Action::ask(
-        "wifi: add / update",
-        &["SSID:", "password (empty = open):"],
-        move |a| {
-            if demo {
-                mock_wifi_add(&mock, &a[0], &a[1]);
-                println!("wifi `{}' saved (demo)", a[0]);
-                return Ok(());
-            }
-            config_cmd::wifi(
-                kind,
-                WifiAction::Add {
-                    ssid: a[0].clone(),
-                    pass: a[1].clone(),
-                },
-                false,
-            )
-        },
-    ));
-
-    let mock = origin.clone();
-    v.push(Action::ask("wifi: remove", &["SSID:"], move |a| {
-        if demo {
-            mock_wifi_remove(&mock, &a[0]);
-            println!("wifi `{}' removed (demo)", a[0]);
-            return Ok(());
-        }
-        config_cmd::wifi(kind, WifiAction::Remove { ssid: a[0].clone() }, false)
-    }));
-
-    let mock = origin.clone();
-    v.push(Action::ask("server-url", &["MQTT broker URL:"], move |a| {
-        if demo {
-            mock_patch(&mock, "server_url", a[0].clone().into());
-            println!("server_url = {} (demo)", a[0]);
-            return Ok(());
-        }
-        config_cmd::server_url(kind, a[0].clone(), false)
-    }));
-
-    let mock = origin.clone();
-    v.push(Action::ask(
-        "asr: set",
-        &[
-            "uri (empty = keep):",
-            "api-key (empty = keep):",
-            "model (empty = keep):",
-        ],
-        move |a| {
-            if demo {
-                let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
-                mock_asr_set(
-                    &mock,
-                    opt(&a[0]).as_deref(),
-                    opt(&a[1]).as_deref(),
-                    opt(&a[2]).as_deref(),
-                );
-                println!("asr_config updated (demo)");
-                return Ok(());
-            }
-            let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
-            config_cmd::asr(
-                kind,
-                config_cmd::AsrOpts {
-                    uri: opt(&a[0]),
-                    api_key: opt(&a[1]),
-                    model: opt(&a[2]),
-                    clean: false,
-                },
-                false,
-            )
-        },
-    ));
-
-    let mock = origin.clone();
-    v.push(Action::imm("asr: clear", move |_| {
-        if demo {
-            mock_patch(
-                &mock,
-                "asr_config",
-                serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
-            );
-            println!("asr_config cleared (demo)");
-            return Ok(());
-        }
-        config_cmd::asr(
-            kind,
-            config_cmd::AsrOpts {
-                uri: None,
-                api_key: None,
-                model: None,
-                clean: true,
-            },
-            false,
-        )
-    }));
-
-    v.push(Action::imm("reset device", move |_| {
-        if demo {
-            println!("device rebooting (demo)");
-            return Ok(());
-        }
-        config_cmd::reset(kind)
-    }));
-
-    if keys {
-        let mock = origin.clone();
-        v.push(Action::ask("mic-model", &["ptt | toggle:"], move |a| {
-            if demo {
-                let val = match a[0].to_lowercase().as_str() {
-                    "ptt" => 0,
-                    "toggle" => 1,
-                    other => anyhow::bail!("invalid mic mode `{other}` — use ptt or toggle"),
-                };
-                mock_patch(&mock, "mic_model", serde_json::json!(val));
-                println!("mic_model = {val} (demo)");
-                return Ok(());
-            }
-            config_cmd::mic_model(kind, a[0].clone(), false)
-        }));
-
-        let mock = origin.clone();
-        v.push(Action::ask("prefer-asr", &["on | off:"], move |a| {
-            let on = match a[0].to_lowercase().as_str() {
-                "on" | "true" => true,
-                "off" | "false" => false,
-                other => anyhow::bail!("invalid value `{other}` — use on or off"),
-            };
-            if demo {
-                mock_patch(&mock, "prefer_builtin_asr", serde_json::json!(on));
-                println!("prefer_builtin_asr = {on} (demo)");
-                return Ok(());
-            }
-            config_cmd::prefer_asr(kind, on, false)
-        }));
-
-        let mock = origin.clone();
-        v.push(Action::ask(
-            "keymap",
-            &[
-                concat!(
-                    "key (",
-                    "MIC/CUSTOM/ESC/NEXT/BACKSPACE/SWITCH/ACCEPT/ROTATE",
-                    "):"
-                ),
-                "binding (text: \"/compact\\n\"  combo: Ctrl+C):",
-            ],
-            move |a| {
-                if demo {
-                    mock_keymap(&mock, &a[0], &a[1]);
-                    println!("keymap {} updated (demo)", a[0]);
-                    return Ok(());
-                }
-                config_cmd::keymap(kind, a[0].clone(), a[1].clone())
-            },
-        ));
-    }
-
-    let mock = origin.clone();
-    v.push(Action::ask(
-        "tailscale: bind",
-        &["tailscale auth key:"],
-        move |a| {
-            if demo {
-                mock_patch(&mock, "tailscale_key", a[0].clone().into());
-                println!("tailscale key bound (demo)");
-                return Ok(());
-            }
-            config_cmd::tailscale(kind, a[0].clone())
-        },
-    ));
-
-    v
-}
-
 /// demo 用的假设备状态(内存配置,动作直接改它)。
-type Mock = std::rc::Rc<std::cell::RefCell<serde_json::Value>>;
+type Mock = Rc<std::cell::RefCell<serde_json::Value>>;
 
 fn sample_config(kind: crate::ble::DeviceKind) -> serde_json::Value {
     use crate::ble::DeviceKind;
@@ -374,30 +151,422 @@ fn mock_keymap(mock: &Mock, key: &str, binding: &str) {
     m["keymap"][&physical] = parsed;
 }
 
+/// 可编辑字段:决定回车提交时调用哪个动作。
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    ServerUrl,
+    WifiAdd,
+    WifiRemove,
+    AsrUri,
+    AsrApiKey,
+    AsrModel,
+    MicModel,
+    PreferAsr,
+    Keymap,
+    Tailscale,
+}
+
+/// 编辑框的占位提示(底部消息行)。
+fn field_hint(field: Field) -> &'static str {
+    match field {
+        Field::ServerUrl => "mqtt://user:pass@host:1883",
+        Field::WifiAdd => "ssid password (password 可含空格,空 = 开放网络)",
+        Field::WifiRemove => "ssid",
+        Field::AsrUri => "https://…/audio/transcriptions",
+        Field::AsrApiKey => "api key",
+        Field::AsrModel => "whisper-1",
+        Field::MicModel => "ptt | toggle",
+        Field::PreferAsr => "on | off",
+        Field::Keymap => "KEY=BINDING,如 CUSTOM=\"/compact\\n\"",
+        Field::Tailscale => "tskey-auth-…",
+    }
+}
+
+/// 提交一个编辑值:demo 落到假配置,真机走 config_cmd(一次 BLE 会话)。
+fn apply_field(
+    kind: crate::ble::DeviceKind,
+    demo: bool,
+    mock: &Mock,
+    field: Field,
+    val: &str,
+) -> Result<()> {
+    let val = val.trim();
+    match field {
+        Field::ServerUrl => {
+            if demo {
+                mock_patch(mock, "server_url", val.into());
+                println!("server_url = {val} (demo)");
+                return Ok(());
+            }
+            config_cmd::server_url(kind, val.to_string(), false)
+        }
+        Field::WifiAdd => {
+            let Some((ssid, pass)) = val.split_once(' ') else {
+                bail!("需要 `ssid password`(空格分隔;密码可含空格则只写 ssid)");
+            };
+            if demo {
+                mock_wifi_add(mock, ssid, pass);
+                println!("wifi `{ssid}' saved (demo)");
+                return Ok(());
+            }
+            config_cmd::wifi(
+                kind,
+                WifiAction::Add {
+                    ssid: ssid.to_string(),
+                    pass: pass.to_string(),
+                },
+                false,
+            )
+        }
+        Field::WifiRemove => {
+            if demo {
+                mock_wifi_remove(mock, val);
+                println!("wifi `{val}' removed (demo)");
+                return Ok(());
+            }
+            config_cmd::wifi(
+                kind,
+                WifiAction::Remove {
+                    ssid: val.to_string(),
+                },
+                false,
+            )
+        }
+        Field::AsrUri => {
+            if demo {
+                mock_asr_set(mock, Some(val), None, None);
+                println!("asr uri = {val} (demo)");
+                return Ok(());
+            }
+            config_cmd::asr(
+                kind,
+                config_cmd::AsrOpts {
+                    uri: Some(val.to_string()),
+                    ..Default::default()
+                },
+                false,
+            )
+        }
+        Field::AsrApiKey => {
+            if demo {
+                mock_asr_set(mock, None, Some(val), None);
+                println!("asr api-key updated (demo)");
+                return Ok(());
+            }
+            config_cmd::asr(
+                kind,
+                config_cmd::AsrOpts {
+                    api_key: Some(val.to_string()),
+                    ..Default::default()
+                },
+                false,
+            )
+        }
+        Field::AsrModel => {
+            if demo {
+                mock_asr_set(mock, None, None, Some(val));
+                println!("asr model = {val} (demo)");
+                return Ok(());
+            }
+            config_cmd::asr(
+                kind,
+                config_cmd::AsrOpts {
+                    model: Some(val.to_string()),
+                    ..Default::default()
+                },
+                false,
+            )
+        }
+        Field::MicModel => {
+            if demo {
+                let v = match val.to_lowercase().as_str() {
+                    "ptt" => 0,
+                    "toggle" => 1,
+                    other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
+                };
+                mock_patch(mock, "mic_model", serde_json::json!(v));
+                println!("mic_model = {v} (demo)");
+                return Ok(());
+            }
+            config_cmd::mic_model(kind, val.to_string(), false)
+        }
+        Field::PreferAsr => {
+            let on = match val.to_lowercase().as_str() {
+                "on" | "true" => true,
+                "off" | "false" => false,
+                other => bail!("invalid value `{other}` — use on or off"),
+            };
+            if demo {
+                mock_patch(mock, "prefer_builtin_asr", serde_json::json!(on));
+                println!("prefer_builtin_asr = {on} (demo)");
+                return Ok(());
+            }
+            config_cmd::prefer_asr(kind, on, false)
+        }
+        Field::Keymap => {
+            let Some((key, binding)) = val.split_once('=') else {
+                bail!("需要 `KEY=BINDING`,如 CUSTOM=\"/compact\\n\"");
+            };
+            if demo {
+                mock_keymap(mock, key.trim(), binding.trim());
+                println!("keymap {} updated (demo)", key.trim());
+                return Ok(());
+            }
+            config_cmd::keymap(kind, key.trim().to_string(), binding.trim().to_string())
+        }
+        Field::Tailscale => {
+            if demo {
+                mock_patch(mock, "tailscale_key", val.into());
+                println!("tailscale key bound (demo)");
+                return Ok(());
+            }
+            config_cmd::tailscale(kind, val.to_string())
+        }
+    }
+}
+
+/// 从 CONFIG 快照取一个字段的展示值(走点路径,缺失 = "")。
+fn cfg_get(v: &serde_json::Value, path: &[&str]) -> String {
+    let mut cur = v;
+    for p in path {
+        match cur.get(p) {
+            Some(next) => cur = next,
+            None => return String::new(),
+        }
+    }
+    match cur {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn asr_cfg(v: &serde_json::Value, key: &str) -> String {
+    cfg_get(v, &["asr_config", key])
+}
+
+/// 每行:所属节 + 标签 + 行为(立即执行 / 行内编辑)+ 当前值。
+enum DevRow {
+    Run {
+        section: &'static str,
+        label: &'static str,
+        run: Rc<dyn Fn() -> Result<()>>,
+        value: Rc<dyn Fn(&serde_json::Value) -> String>,
+    },
+    Edit {
+        section: &'static str,
+        label: &'static str,
+        field: Field,
+        value: Rc<dyn Fn(&serde_json::Value) -> String>,
+    },
+}
+
+impl DevRow {
+    fn section(&self) -> &'static str {
+        match self {
+            Self::Run { section, .. } | Self::Edit { section, .. } => section,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Run { label, .. } | Self::Edit { label, .. } => label,
+        }
+    }
+
+    fn value(&self, cfg: &serde_json::Value) -> String {
+        match self {
+            Self::Run { value, .. } | Self::Edit { value, .. } => value(cfg),
+        }
+    }
+}
+
+fn device_rows(kind: crate::ble::DeviceKind, demo: bool, mock: Mock) -> Vec<DevRow> {
+    use crate::ble::DeviceKind;
+    let keys = kind == DeviceKind::VibeKeys;
+    let mut v: Vec<DevRow> = Vec::new();
+    let origin = mock;
+
+    v.push(DevRow::Edit {
+        section: "server",
+        label: "server-url",
+        field: Field::ServerUrl,
+        value: Rc::new(|c| cfg_get(c, &["server_url"])),
+    });
+
+    v.push(DevRow::Edit {
+        section: "wifi",
+        label: "add (ssid pass)",
+        field: Field::WifiAdd,
+        value: Rc::new(|_| String::new()),
+    });
+    v.push(DevRow::Edit {
+        section: "wifi",
+        label: "remove (ssid)",
+        field: Field::WifiRemove,
+        value: Rc::new(|_| String::new()),
+    });
+    let mock = origin.clone();
+    v.push(DevRow::Run {
+        section: "wifi",
+        label: "show list",
+        run: Rc::new(move || {
+            if demo {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
+                );
+                return Ok(());
+            }
+            config_cmd::wifi(kind, WifiAction::Show, false)
+        }),
+        value: Rc::new(|c| match c.get("wifi_list").and_then(|v| v.as_array()) {
+            Some(arr) => format!(
+                "{} network(s): {}",
+                arr.len(),
+                arr.iter()
+                    .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        }),
+    });
+
+    v.push(DevRow::Edit {
+        section: "asr",
+        label: "uri",
+        field: Field::AsrUri,
+        value: Rc::new(|c| asr_cfg(c, "uri")),
+    });
+    v.push(DevRow::Edit {
+        section: "asr",
+        label: "api-key",
+        field: Field::AsrApiKey,
+        value: Rc::new(|c| asr_cfg(c, "api_key")),
+    });
+    v.push(DevRow::Edit {
+        section: "asr",
+        label: "model",
+        field: Field::AsrModel,
+        value: Rc::new(|c| asr_cfg(c, "model")),
+    });
+    let mock = origin.clone();
+    v.push(DevRow::Run {
+        section: "asr",
+        label: "clear",
+        run: Rc::new(move || {
+            if demo {
+                mock_patch(
+                    &mock,
+                    "asr_config",
+                    serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
+                );
+                println!("asr_config cleared (demo)");
+                return Ok(());
+            }
+            config_cmd::asr(
+                kind,
+                config_cmd::AsrOpts {
+                    uri: None,
+                    api_key: None,
+                    model: None,
+                    clean: true,
+                },
+                false,
+            )
+        }),
+        value: Rc::new(|_| String::new()),
+    });
+
+    if keys {
+        v.push(DevRow::Edit {
+            section: "keyboard",
+            label: "mic-model",
+            field: Field::MicModel,
+            value: Rc::new(|c| match c.get("mic_model").and_then(|v| v.as_u64()) {
+                Some(0) => "ptt".into(),
+                Some(1) => "toggle".into(),
+                _ => String::new(),
+            }),
+        });
+        v.push(DevRow::Edit {
+            section: "keyboard",
+            label: "prefer-asr",
+            field: Field::PreferAsr,
+            value: Rc::new(
+                |c| match c.get("prefer_builtin_asr").and_then(|v| v.as_bool()) {
+                    Some(true) => "on".into(),
+                    Some(false) => "off".into(),
+                    _ => String::new(),
+                },
+            ),
+        });
+        v.push(DevRow::Edit {
+            section: "keyboard",
+            label: "keymap (KEY=BINDING)",
+            field: Field::Keymap,
+            value: Rc::new(|c| match c.get("keymap").and_then(|v| v.as_object()) {
+                Some(m) if !m.is_empty() => {
+                    let pairs: Vec<String> =
+                        m.iter().map(|(k, val)| format!("{k}={val}")).collect();
+                    pairs.join("  ")
+                }
+                _ => String::new(),
+            }),
+        });
+    }
+
+    v.push(DevRow::Edit {
+        section: "device",
+        label: "tailscale: bind",
+        field: Field::Tailscale,
+        value: Rc::new(|c| {
+            // 真机快照不含 tailscale_key(仅写);demo 里改过才显示。
+            let v = cfg_get(c, &["tailscale_key"]);
+            if v.is_empty() { v } else { "(set)".into() }
+        }),
+    });
+    v.push(DevRow::Run {
+        section: "device",
+        label: "reset device",
+        run: Rc::new(move || {
+            if demo {
+                println!("device rebooting (demo)");
+                return Ok(());
+            }
+            config_cmd::reset(kind)
+        }),
+        value: Rc::new(|_| String::new()),
+    });
+
+    v
+}
+
 struct DeviceTab {
     kind: crate::ble::DeviceKind,
     config: Option<serde_json::Value>,
-    actions: Vec<Action>,
+    rows: Vec<DevRow>,
     sel: usize,
-    /// 按钮网格的列数,渲染时算出、按键导航用(Cell 是因为 ui() 只拿得到 &Self)。
-    grid_cols: std::cell::Cell<usize>,
     /// demo 模式:不碰 BLE,动作改内存里的假配置。
     demo: bool,
     mock: Mock,
+    /// 行内编辑:选中行下标 + 当前输入。None = 浏览模式。
+    editing: Option<(usize, String)>,
 }
 
 impl DeviceTab {
     fn new(kind: crate::ble::DeviceKind, demo: bool) -> Self {
-        let mock = std::rc::Rc::new(std::cell::RefCell::new(sample_config(kind)));
-        let actions = device_actions(kind, demo, mock.clone());
+        let mock = Rc::new(std::cell::RefCell::new(sample_config(kind)));
+        let rows = device_rows(kind, demo, mock.clone());
         Self {
             kind,
             config: None,
-            actions,
+            rows,
             sel: 0,
-            grid_cols: std::cell::Cell::new(1),
             demo,
             mock,
+            editing: None,
         }
     }
 
@@ -415,87 +584,9 @@ impl DeviceTab {
             Err(_) => self.config = None,
         }
     }
-
-    /// CONFIG 摘要行(显示在动作列表上方)。
-    fn summary(&self) -> Vec<String> {
-        let Some(c) = &self.config else {
-            return vec!["(config not loaded — press r to read from device)".into()];
-        };
-        let gets = |k: &str| {
-            c.get(k)
-                .map(|v| match v {
-                    serde_json::Value::Null => "not set".to_string(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_else(|| "not set".into())
-        };
-        let wifi = c
-            .get("wifi_list")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                let names: Vec<&str> = arr
-                    .iter()
-                    .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
-                    .collect();
-                format!("{} network(s): {}", names.len(), names.join(", "))
-            })
-            .unwrap_or_else(|| "not set".into());
-        let mut lines = vec![
-            format!("server_url: {}", gets("server_url")),
-            format!("wifi_list: {wifi}"),
-            format!(
-                "asr: {}",
-                c.get("asr_config")
-                    .and_then(|v| v.get("uri"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("not set")
-            ),
-        ];
-        if self.kind == crate::ble::DeviceKind::VibeKeys {
-            let mic = match c.get("mic_model").and_then(|v| v.as_u64()) {
-                Some(0) => "ptt",
-                Some(1) => "toggle",
-                _ => "not set",
-            };
-            let pref = c
-                .get("prefer_builtin_asr")
-                .and_then(|v| v.as_bool())
-                .map(|b| if b { "on" } else { "off" })
-                .unwrap_or("not set");
-            lines.push(format!("mic_model: {mic}    prefer_builtin_asr: {pref}"));
-        }
-        lines
-    }
 }
 
-// ===== 输入模式 =====
-
-/// 逐项收集一个动作的参数。动作本体留在 `DeviceTab.actions` 里(生命周期更长),
-/// 这里只记它的下标和已收集的答案。
-struct InputState {
-    /// 剩余要问的 prompt;buffer 是当前这条的输入。
-    prompts: Vec<String>,
-    answers: Vec<String>,
-    buffer: String,
-    action_idx: usize,
-}
-
-impl InputState {
-    fn current_prompt(&self) -> Option<&str> {
-        self.prompts.first().map(|s| s.as_str())
-    }
-
-    /// Enter:收下当前答案。返回 true = 全部收齐,可以执行了。
-    fn submit(&mut self) -> bool {
-        let answer = std::mem::take(&mut self.buffer);
-        self.answers.push(answer);
-        self.prompts.remove(0);
-        self.prompts.is_empty()
-    }
-}
-
-// ===== 主循环 =====
+// ===== 标签 =====
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -533,8 +624,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
     let mut watch_tab = DeviceTab::new(crate::ble::DeviceKind::Watch, demo);
     // 默认停在「管理」:不碰蓝牙,启动零延迟;设备页进了才连。
     let mut tab = Tab::Pkgs;
-    let mut input: Option<InputState> = None;
-    let mut message = String::from("Tab switch tabs · ↑↓ select · Enter run · r refresh · q quit");
+    let mut message = String::from("Tab tabs · ↑↓ select · Enter run/edit · r refresh · q quit");
     fetch(&mut pkg_entries, &dir);
 
     let mut terminal = ratatui::init();
@@ -544,6 +634,11 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
         let _ = event::read();
     }
     loop {
+        let editing = match tab {
+            Tab::Keys => keys_tab.editing.as_ref(),
+            Tab::Watch => watch_tab.editing.as_ref(),
+            Tab::Pkgs => None,
+        };
         terminal.draw(|f| {
             ui(
                 f,
@@ -554,7 +649,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     pkgs: &pkg_entries,
                     pkg_sel,
                     allow_pre,
-                    input: input.as_ref(),
+                    editing,
                     message: &message,
                     demo,
                 },
@@ -567,42 +662,40 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
             continue;
         }
 
-        // 输入模式独占按键。
-        if let Some(state) = input.as_mut() {
+        // 设备页的行内编辑独占按键。
+        if tab != Tab::Pkgs && keys_tab.editing.is_some() || watch_tab.editing.is_some() {
+            let t = if keys_tab.editing.is_some() {
+                &mut keys_tab
+            } else {
+                &mut watch_tab
+            };
+            let Some((_, buf)) = t.editing.as_mut() else {
+                unreachable!()
+            };
             match key.code {
                 KeyCode::Esc => {
-                    input = None;
-                    message = "input cancelled".into();
+                    t.editing = None;
+                    message = "edit cancelled".into();
                 }
                 KeyCode::Enter => {
-                    // 收答案;收齐了就地执行(动作本体在 DeviceTab.actions 里)。
-                    let mut done = None;
-                    if let Some(state) = input.as_mut()
-                        && state.submit()
-                    {
-                        done = Some((state.action_idx, state.answers.clone()));
-                    }
-                    if let Some((idx, answers)) = done {
-                        input = None;
-                        let t = match tab {
-                            Tab::Keys => &mut keys_tab,
-                            Tab::Watch => &mut watch_tab,
-                            Tab::Pkgs => unreachable!("input only starts on device tabs"),
-                        };
-                        let action = &t.actions[idx];
-                        let label = action.label;
-                        let run = &action.run;
-                        let res = suspend(&mut terminal, || run(&answers));
-                        message = format!("{label}: {}", describe(&res, dry_run));
-                        if res.is_ok() && !dry_run {
-                            t.load_config(&mut terminal);
-                        }
+                    let (idx, val) = t.editing.take().unwrap();
+                    let (label, field) = match &t.rows[idx] {
+                        DevRow::Edit { label, field, .. } => (*label, *field),
+                        DevRow::Run { .. } => unreachable!(),
+                    };
+                    let (mock, kind) = (t.mock.clone(), t.kind);
+                    let res = suspend(&mut terminal, || {
+                        apply_field(kind, demo, &mock, field, &val)
+                    });
+                    message = format!("{label}: {}", describe(&res, dry_run));
+                    if res.is_ok() && !dry_run {
+                        t.load_config(&mut terminal);
                     }
                 }
                 KeyCode::Backspace => {
-                    state.buffer.pop();
+                    buf.pop();
                 }
-                KeyCode::Char(c) => state.buffer.push(c),
+                KeyCode::Char(c) => buf.push(c),
                 _ => {}
             }
             continue;
@@ -610,9 +703,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
 
         match key.code {
             KeyCode::Char('q') => break,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                break;
-            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Tab => {
                 tab = tab.next();
                 message = default_message(tab);
@@ -650,50 +741,14 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => match tab {
-                // 按钮网格里 = 向下移动一行;包列表 = 下一行。
-                Tab::Keys | Tab::Watch => {
-                    let t = if tab == Tab::Keys {
-                        &mut keys_tab
-                    } else {
-                        &mut watch_tab
-                    };
-                    let cols = t.grid_cols.get();
-                    t.sel = (t.sel + cols).min(t.actions.len() - 1);
-                }
+                Tab::Keys => keys_tab.sel = (keys_tab.sel + 1).min(keys_tab.rows.len() - 1),
+                Tab::Watch => watch_tab.sel = (watch_tab.sel + 1).min(watch_tab.rows.len() - 1),
                 Tab::Pkgs => pkg_sel = (pkg_sel + 1) % pkg_entries.len(),
             },
             KeyCode::Char('k') | KeyCode::Up => match tab {
-                Tab::Keys | Tab::Watch => {
-                    let t = if tab == Tab::Keys {
-                        &mut keys_tab
-                    } else {
-                        &mut watch_tab
-                    };
-                    t.sel = t.sel.saturating_sub(t.grid_cols.get());
-                }
+                Tab::Keys => keys_tab.sel = keys_tab.sel.saturating_sub(1),
+                Tab::Watch => watch_tab.sel = watch_tab.sel.saturating_sub(1),
                 Tab::Pkgs => pkg_sel = (pkg_sel + pkg_entries.len() - 1) % pkg_entries.len(),
-            },
-            KeyCode::Char('l') | KeyCode::Right => match tab {
-                Tab::Keys | Tab::Watch => {
-                    let t = if tab == Tab::Keys {
-                        &mut keys_tab
-                    } else {
-                        &mut watch_tab
-                    };
-                    t.sel = (t.sel + 1).min(t.actions.len() - 1);
-                }
-                Tab::Pkgs => {}
-            },
-            KeyCode::Char('h') | KeyCode::Left => match tab {
-                Tab::Keys | Tab::Watch => {
-                    let t = if tab == Tab::Keys {
-                        &mut keys_tab
-                    } else {
-                        &mut watch_tab
-                    };
-                    t.sel = t.sel.saturating_sub(1);
-                }
-                Tab::Pkgs => {}
             },
             KeyCode::Char('p') => {
                 allow_pre = !allow_pre;
@@ -714,7 +769,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                                 pkgs: &pkg_entries,
                                 pkg_sel,
                                 allow_pre,
-                                input: input.as_ref(),
+                                editing: None,
                                 message: &message,
                                 demo,
                             },
@@ -726,34 +781,27 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
             },
             KeyCode::Enter => match tab {
                 Tab::Keys | Tab::Watch => {
-                    let t = match tab {
-                        Tab::Keys => &mut keys_tab,
-                        _ => &mut watch_tab,
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
                     };
                     if t.config.is_none() {
                         t.load_config(&mut terminal);
                     }
-                    let action = &t.actions[t.sel];
-                    if action.prompts.is_empty() {
-                        let run = &action.run;
-                        let res = suspend(&mut terminal, || run(&[]));
-                        message = format!("{}: {}", action.label, describe(&res, dry_run));
-                        if res.is_ok() {
-                            let kind = t.kind;
-                            t.config = suspend(&mut terminal, || {
-                                crate::ble::with_device(kind, |p| async move {
-                                    crate::ble::read_config(&p).await
-                                })
-                            })
-                            .ok();
+                    match &t.rows[t.sel] {
+                        DevRow::Run { label, run, .. } => {
+                            let (label, run) = (*label, run.clone());
+                            let res = suspend(&mut terminal, || run());
+                            message = format!("{label}: {}", describe(&res, dry_run));
+                            if res.is_ok() && !dry_run {
+                                t.load_config(&mut terminal);
+                            }
                         }
-                    } else {
-                        input = Some(InputState {
-                            prompts: action.prompts.iter().map(|s| s.to_string()).collect(),
-                            answers: vec![],
-                            buffer: String::new(),
-                            action_idx: t.sel,
-                        });
+                        DevRow::Edit { .. } => {
+                            t.editing = Some((t.sel, String::new()));
+                            message = "editing — Enter save · Esc cancel".into();
+                        }
                     }
                 }
                 Tab::Pkgs => {
@@ -810,8 +858,8 @@ fn describe<T>(res: &Result<T>, dry_run: bool) -> String {
 
 fn default_message(tab: Tab) -> String {
     match tab {
-        Tab::Keys => "vibekeys — Enter runs, r re-reads config".into(),
-        Tab::Watch => "watch — Enter runs, r re-reads config".into(),
+        Tab::Keys => "vibekeys — Enter run/edit · r re-read config".into(),
+        Tab::Watch => "watch — Enter run/edit · r re-read config".into(),
         Tab::Pkgs => "packages — u update · U all · p prerelease".into(),
     }
 }
@@ -848,7 +896,6 @@ fn short_status(s: &str) -> &str {
 
 // ===== 绘制 =====
 
-/// `ui` 的一揽子状态引用。
 struct UiRefs<'a> {
     tab: Tab,
     keys: &'a DeviceTab,
@@ -856,7 +903,7 @@ struct UiRefs<'a> {
     pkgs: &'a [Entry],
     pkg_sel: usize,
     allow_pre: bool,
-    input: Option<&'a InputState>,
+    editing: Option<&'a (usize, String)>,
     message: &'a str,
     demo: bool,
 }
@@ -869,26 +916,27 @@ fn ui(f: &mut Frame, r: UiRefs) {
         pkgs: pkg_entries,
         pkg_sel,
         allow_pre,
-        input,
+        editing,
         message,
         demo,
     } = r;
+
     let [tabs, area, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(if input.is_some() { 3 } else { 2 }),
+        Constraint::Length(2),
     ])
     .areas(f.area());
 
     // 标签栏。
-    let spans: Vec<ratatui::text::Span> = Tab::all()
+    let spans: Vec<Span> = Tab::all()
         .iter()
         .map(|t| {
-            let text = match t {
-                Tab::Keys => format!(" 1 {} ", t.title()),
-                Tab::Watch => format!(" 2 {} ", t.title()),
-                Tab::Pkgs => format!(" 3 {} ", t.title()),
-            };
+            let text = format!(
+                " {} {} ",
+                Tab::all().iter().position(|x| x == t).unwrap() + 1,
+                t.title()
+            );
             let style = if *t == tab {
                 Style::default()
                     .bg(Color::LightBlue)
@@ -896,7 +944,7 @@ fn ui(f: &mut Frame, r: UiRefs) {
             } else {
                 Style::default()
             };
-            ratatui::text::Span::styled(text, style)
+            Span::styled(text, style)
         })
         .collect();
     f.render_widget(Line::from(spans), tabs);
@@ -908,7 +956,7 @@ fn ui(f: &mut Frame, r: UiRefs) {
             } else {
                 watch_tab
             };
-            render_device_tab(f, area, t, input);
+            render_device_tab(f, area, t, editing);
         }
         Tab::Pkgs => render_packages_tab(f, area, pkg_entries, pkg_sel, allow_pre),
     }
@@ -919,71 +967,101 @@ fn ui(f: &mut Frame, r: UiRefs) {
         on_off(allow_pre),
         if demo { " · DEMO" } else { "" }
     );
-    let mut lines = vec![
+    let lines = vec![
         Line::from(title),
         Line::from(format!("{message}  ·  q quit · Tab tabs · r refresh")),
     ];
-    if let Some(state) = input
-        && let Some(prompt) = state.current_prompt()
-    {
-        lines.push(Line::from(format!(
-            "{prompt} {}▏  (Enter submit · Esc cancel)",
-            state.buffer
-        )));
-    }
     f.render_widget(Paragraph::new(lines), footer);
 }
 
-fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, input: Option<&InputState>) {
-    // 像 HTML 卡片一样的一整块:边框 + 标题,摘要在上,动作按钮流式换行填满宽度。
-    let device_title = match t.kind {
-        crate::ble::DeviceKind::VibeKeys => " VibeKeys ",
-        crate::ble::DeviceKind::Watch => " VibeWatch ",
-    };
-    let block = ratatui::widgets::Block::bordered().title(device_title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+/// 连续行按 section 分组。
+struct Section {
+    name: &'static str,
+    start: usize,
+    len: usize,
+}
 
-    // 摘要:卡片顶部,高度随行数走。
-    let summary: Vec<Line> = t.summary().into_iter().map(Line::from).collect();
-    let [sum_area, grid_area] =
-        Layout::vertical([Constraint::Length(summary.len() as u16), Constraint::Min(0)])
-            .areas(inner);
-    f.render_widget(Paragraph::new(summary), sum_area);
-
-    // 按钮网格(flex-wrap):等宽格子,放不下的换行,填满卡片宽度。
-    let cell_w = t
-        .actions
-        .iter()
-        .map(|a| a.label.len() + 3) // 两侧各 1 格 padding + 1 格间隔
-        .max()
-        .unwrap_or(1) as u16;
-    let cols = ((grid_area.width / cell_w) as usize).max(1);
-    t.grid_cols.set(cols);
-    for (i, a) in t.actions.iter().enumerate() {
-        let (row, col) = ((i / cols) as u16, (i % cols) as u16);
-        let x = grid_area.x + col * cell_w;
-        let y = grid_area.y + row;
-        if y >= grid_area.bottom() || x >= grid_area.right() {
-            break; // 卡片高度不够放完就停(动作不会多到放不下)
+fn sections_of(rows: &[DevRow]) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        match out.last_mut() {
+            Some(s) if s.name == row.section() => s.len += 1,
+            _ => out.push(Section {
+                name: row.section(),
+                start: i,
+                len: 1,
+            }),
         }
-        let w = (cell_w - 1).min(grid_area.right() - x);
-        let rect = Rect {
-            x,
-            y,
-            width: w,
-            height: 1,
-        };
-        let style = if i == t.sel {
-            Style::default()
-                .bg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().bg(Color::DarkGray)
-        };
-        f.render_widget(Paragraph::new(format!(" {} ", a.label)).style(style), rect);
     }
-    let _ = input;
+    out
+}
+
+fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&(usize, String)>) {
+    let sections = sections_of(&t.rows);
+    let areas = Layout::vertical(
+        sections
+            .iter()
+            .map(|s| Constraint::Length(s.len as u16 + 1)),
+    )
+    .split(area);
+
+    for (sec, sec_area) in sections.iter().zip(areas.iter()) {
+        // 每节:只有一条上边框,节名嵌在框线上(像 HTML 的 <fieldset><legend>)。
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .title(format!(" {} ", sec.name))
+            .title_style(Style::default().add_modifier(Modifier::BOLD));
+        let inner = block.inner(*sec_area);
+        f.render_widget(block, *sec_area);
+
+        let mut lines: Vec<Line> = Vec::with_capacity(sec.len);
+        for i in sec.start..sec.start + sec.len {
+            let row = &t.rows[i];
+            let selected = i == t.sel;
+            let editing_this = editing.is_some_and(|(idx, _)| *idx == i);
+            let mut spans = vec![
+                Span::raw("  "),
+                Span::styled(row.label(), Style::default().add_modifier(Modifier::BOLD)),
+            ];
+
+            if editing_this {
+                // 原地编辑框:值的位置变成输入缓冲 + 光标。
+                let buf = editing.map(|(_, b)| b.clone()).unwrap_or_default();
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("{}▏", buf),
+                    Style::default()
+                        .bg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("  ({})", field_hint(row_field(row))),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                let val = t.config.as_ref().map(|c| row.value(c)).unwrap_or_default();
+                if !val.is_empty() {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(val, Style::default().fg(Color::Gray)));
+                }
+            }
+
+            let line = Line::from(spans);
+            lines.push(if selected {
+                line.style(Style::default().bg(Color::DarkGray))
+            } else {
+                line
+            });
+        }
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+fn row_field(row: &DevRow) -> Field {
+    match row {
+        DevRow::Edit { field, .. } => *field,
+        DevRow::Run { .. } => unreachable!("edit box on a Run row"),
+    }
 }
 
 fn render_packages_tab(f: &mut Frame, area: Rect, entries: &[Entry], sel: usize, allow_pre: bool) {
@@ -1062,7 +1140,7 @@ mod tests {
     use crate::ble::DeviceKind;
 
     fn mock() -> Mock {
-        std::rc::Rc::new(std::cell::RefCell::new(sample_config(DeviceKind::VibeKeys)))
+        Rc::new(std::cell::RefCell::new(sample_config(DeviceKind::VibeKeys)))
     }
 
     #[test]
@@ -1113,5 +1191,37 @@ mod tests {
         let km = &m.borrow()["keymap"];
         assert_eq!(km["SWITCH"]["type"], "text");
         assert_eq!(km["SWITCH"]["value"], "/review\n");
+    }
+
+    #[test]
+    fn sections_group_consecutive_rows() {
+        let rows = device_rows(DeviceKind::VibeKeys, true, mock());
+        let secs = sections_of(&rows);
+        let names: Vec<&str> = secs.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["server", "wifi", "asr", "keyboard", "device"]);
+        assert_eq!(secs.iter().map(|s| s.len).sum::<usize>(), rows.len());
+    }
+
+    #[test]
+    fn apply_field_demo_updates_mock() {
+        let m = mock();
+        apply_field(DeviceKind::VibeKeys, true, &m, Field::ServerUrl, "mqtt://x").unwrap();
+        assert_eq!(m.borrow()["server_url"], "mqtt://x");
+        apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "ptt").unwrap();
+        assert_eq!(m.borrow()["mic_model"], 0);
+        apply_field(DeviceKind::VibeKeys, true, &m, Field::WifiAdd, "Cafe pw 1").unwrap();
+        let list = m.borrow()["wifi_list"].clone();
+        assert_eq!(list.as_array().unwrap().len(), 3);
+        assert_eq!(list.as_array().unwrap()[2]["pass"], "pw 1");
+        apply_field(
+            DeviceKind::VibeKeys,
+            true,
+            &m,
+            Field::Keymap,
+            "CUSTOM=\"/compact\\n\"",
+        )
+        .unwrap();
+        assert_eq!(m.borrow()["keymap"]["CUSTOM"]["type"], "text");
+        apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "bogus").unwrap_err();
     }
 }

@@ -115,6 +115,7 @@ pub fn server_url(kind: DeviceKind, url: String, reset: bool) -> Result<()> {
     })
 }
 
+#[derive(Default)]
 pub struct AsrOpts {
     pub uri: Option<String>,
     pub api_key: Option<String>,
