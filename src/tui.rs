@@ -849,7 +849,8 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
         let Event::Key(key) = event::read()? else {
             continue;
         };
-        if key.kind != KeyEventKind::Press {
+        // 支持长按:终端按住会连发 Press(老协议)或 Repeat(kitty 协议),都收。
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             continue;
         }
 
@@ -1617,7 +1618,7 @@ mod tests {
 
 #[cfg(test)]
 mod input_tests {
-    use super::Input;
+    use super::{Input, Style};
 
     #[test]
     fn insert_at_cursor_and_move() {
