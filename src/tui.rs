@@ -499,32 +499,6 @@ impl DeviceTab {
                 submit,
             }),
         });
-        let mock = self.mock.clone();
-        rows.push(DevRow {
-            section: "wifi",
-            label: "show list".into(),
-            value: match cfg.get("wifi_list").and_then(|v| v.as_array()) {
-                Some(arr) => format!(
-                    "{} network(s): {}",
-                    arr.len(),
-                    arr.iter()
-                        .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                None => String::new(),
-            },
-            action: RowAction::Run(Rc::new(move || {
-                if demo {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
-                    );
-                    return Ok(());
-                }
-                config_cmd::wifi(kind, WifiAction::Show, false)
-            })),
-        });
 
         rows.push(DevRow::edit(
             "asr",
@@ -1436,12 +1410,11 @@ mod tests {
     fn wifi_rows_are_dynamic_with_add_row_last() {
         let t = tab();
         let wifi: Vec<&DevRow> = t.rows.iter().filter(|r| r.section == "wifi").collect();
-        // 2 条现有网络 + add + + show list
-        assert_eq!(wifi.len(), 4);
+        // 2 条现有网络 + add +
+        assert_eq!(wifi.len(), 3);
         assert_eq!(wifi[0].label, "Home");
         assert_eq!(wifi[1].label, "Office");
         assert_eq!(wifi[2].label, "add +");
-        assert_eq!(wifi[3].label, "show list");
         // 现有网络 = WifiEntry(回车改密码,d 删除);add + = Popup。
         assert!(matches!(&wifi[0].action, RowAction::WifiEntry { ssid } if ssid == "Home"));
         assert!(matches!(wifi[2].action, RowAction::Popup(_)));
