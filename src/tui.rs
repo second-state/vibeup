@@ -360,6 +360,93 @@ fn asr_cfg(v: &serde_json::Value, key: &str) -> String {
 /// pop 框的字段提交动作。
 type Submit = Rc<dyn Fn(&[String]) -> Result<()>>;
 
+/// 带光标的单行输入:支持左右/Home/End 移动、任意位置插入、前后删除。
+#[derive(Default)]
+struct Input {
+    buf: String,
+    /// 光标位置(字符下标,不是字节)。
+    pos: usize,
+}
+
+impl Input {
+    fn with_str(s: &str) -> Self {
+        Self {
+            buf: s.to_string(),
+            pos: s.chars().count(),
+        }
+    }
+
+    fn chars(&self) -> usize {
+        self.buf.chars().count()
+    }
+
+    /// 光标的字节偏移。
+    fn byte_pos(&self) -> usize {
+        self.buf
+            .char_indices()
+            .nth(self.pos)
+            .map(|(i, _)| i)
+            .unwrap_or(self.buf.len())
+    }
+
+    fn left(&mut self) {
+        self.pos = self.pos.saturating_sub(1);
+    }
+
+    fn right(&mut self) {
+        if self.pos < self.chars() {
+            self.pos += 1;
+        }
+    }
+
+    fn home(&mut self) {
+        self.pos = 0;
+    }
+
+    fn end(&mut self) {
+        self.pos = self.chars();
+    }
+
+    fn insert(&mut self, c: char) {
+        let b = self.byte_pos();
+        self.buf.insert(b, c);
+        self.pos += 1;
+    }
+
+    /// 删光标前的字符(Backspace)。
+    fn backspace(&mut self) {
+        if self.pos == 0 {
+            return;
+        }
+        let b = self.byte_pos();
+        let prev = self.buf[..b]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.buf.replace_range(prev..b, "");
+        self.pos -= 1;
+    }
+
+    /// 删光标处的字符(Delete)。
+    fn delete(&mut self) {
+        let b = self.byte_pos();
+        let Some(c) = self.buf[b..].chars().next() else {
+            return;
+        };
+        self.buf.replace_range(b..b + c.len_utf8(), "");
+    }
+
+    /// 渲染;`cursor` 时把光标(▏)画在当前位置。
+    fn render(&self, cursor: bool) -> String {
+        if !cursor {
+            return self.buf.clone();
+        }
+        let b = self.byte_pos();
+        format!("{}▏{}", &self.buf[..b], &self.buf[b..])
+    }
+}
+
 /// pop 框定义:标题 + 字段(带初始值)+ 提交动作。
 struct PopupSpec {
     title: &'static str,
@@ -406,15 +493,38 @@ struct DeviceTab {
     demo: bool,
     mock: Mock,
     /// 行内编辑:选中行下标 + 当前输入。
-    editing: Option<(usize, String)>,
+    editing: Option<(usize, Input)>,
     /// 打开的 pop 框。
     popup: Option<PopupState>,
 }
 
-/// 运行中的 pop 框。
+/// 运行中的 pop 框:字段初始值展开成带光标的输入。
 struct PopupState {
-    spec: PopupSpec,
+    title: String,
+    labels: Vec<&'static str>,
+    inputs: Vec<Input>,
     cur: usize,
+    submit: Submit,
+}
+
+impl PopupState {
+    fn new(spec: &PopupSpec) -> Self {
+        Self {
+            title: spec.title.to_string(),
+            labels: spec.fields.iter().map(|(l, _)| *l).collect(),
+            inputs: spec
+                .fields
+                .iter()
+                .map(|(_, v)| Input::with_str(v))
+                .collect(),
+            cur: 0,
+            submit: spec.submit.clone(),
+        }
+    }
+
+    fn render_field(&self, i: usize) -> String {
+        self.inputs[i].render(i == self.cur)
+    }
 }
 
 impl DeviceTab {
@@ -722,30 +832,40 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     message = "cancelled".into();
                 }
                 KeyCode::Tab | KeyCode::Down => {
-                    popup.cur = (popup.cur + 1) % popup.spec.fields.len();
+                    popup.cur = (popup.cur + 1) % popup.labels.len();
                 }
                 KeyCode::Up => {
-                    popup.cur = (popup.cur + popup.spec.fields.len() - 1) % popup.spec.fields.len();
+                    popup.cur = (popup.cur + popup.labels.len() - 1) % popup.labels.len();
                 }
-                KeyCode::Backspace => {
-                    popup.spec.fields[popup.cur].1.pop();
+                KeyCode::Backspace => popup.inputs[popup.cur].backspace(),
+                KeyCode::Delete => popup.inputs[popup.cur].delete(),
+                KeyCode::Left | KeyCode::Char('h')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    popup.inputs[popup.cur].left();
                 }
+                KeyCode::Right | KeyCode::Char('l')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    popup.inputs[popup.cur].right();
+                }
+                KeyCode::Home => popup.inputs[popup.cur].home(),
+                KeyCode::End => popup.inputs[popup.cur].end(),
                 KeyCode::Enter => {
-                    if popup.cur + 1 < popup.spec.fields.len() {
+                    if popup.cur + 1 < popup.labels.len() {
                         popup.cur += 1;
                     } else {
                         let state = t.popup.take().unwrap();
                         let vals: Vec<String> =
-                            state.spec.fields.iter().map(|(_, b)| b.clone()).collect();
-                        let res = suspend(&mut terminal, || (state.spec.submit)(&vals));
-                        message =
-                            format!("{}: {}", state.spec.title.trim(), describe(&res, dry_run));
+                            state.inputs.iter().map(|i| i.buf.clone()).collect();
+                        let res = suspend(&mut terminal, || (state.submit)(&vals));
+                        message = format!("{}: {}", state.title.trim(), describe(&res, dry_run));
                         if res.is_ok() && !dry_run {
                             t.load_config(&mut terminal);
                         }
                     }
                 }
-                KeyCode::Char(c) => popup.spec.fields[popup.cur].1.push(c),
+                KeyCode::Char(c) => popup.inputs[popup.cur].insert(c),
                 _ => {}
             }
             continue;
@@ -759,7 +879,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
             } else {
                 &mut watch_tab
             };
-            let Some((_, buf)) = t.editing.as_mut() else {
+            let Some((_, input)) = t.editing.as_mut() else {
                 unreachable!()
             };
             match key.code {
@@ -776,17 +896,28 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     let label = t.rows[idx].label.clone();
                     let (mock, kind) = (t.mock.clone(), t.kind);
                     let res = suspend(&mut terminal, || {
-                        apply_field(kind, demo, &mock, field, &val)
+                        apply_field(kind, demo, &mock, field, &val.buf)
                     });
                     message = format!("{label}: {}", describe(&res, dry_run));
                     if res.is_ok() && !dry_run {
                         t.load_config(&mut terminal);
                     }
                 }
-                KeyCode::Backspace => {
-                    buf.pop();
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Left | KeyCode::Char('h')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    input.left();
                 }
-                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Right | KeyCode::Char('l')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    input.right();
+                }
+                KeyCode::Home => input.home(),
+                KeyCode::End => input.end(),
+                KeyCode::Char(c) => input.insert(c),
                 _ => {}
             }
             continue;
@@ -909,16 +1040,11 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                             }
                         }
                         RowAction::Edit(_) => {
-                            t.editing = Some((t.sel, String::new()));
+                            t.editing = Some((t.sel, Input::default()));
                             message = "editing — Enter save · Esc cancel".into();
                         }
                         RowAction::Popup(spec) => {
-                            let spec = PopupSpec {
-                                title: spec.title,
-                                fields: spec.fields.clone(),
-                                submit: spec.submit.clone(),
-                            };
-                            t.popup = Some(PopupState { spec, cur: 0 });
+                            t.popup = Some(PopupState::new(spec));
                             message = "Tab/↑↓ field · Enter save · Esc cancel".into();
                         }
                         RowAction::WifiEntry { ssid } => {
@@ -947,12 +1073,11 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                                 )
                             });
                             t.popup = Some(PopupState {
-                                spec: PopupSpec {
-                                    title: " wifi: change password ",
-                                    fields: vec![("pass", pass)],
-                                    submit,
-                                },
+                                title: " wifi: change password ".into(),
+                                labels: vec!["pass"],
+                                inputs: vec![Input::with_str(&pass)],
                                 cur: 0,
+                                submit,
                             });
                             message = "Enter save · Esc cancel".into();
                         }
@@ -1057,7 +1182,7 @@ struct UiRefs<'a> {
     pkgs: &'a [Entry],
     pkg_sel: usize,
     allow_pre: bool,
-    editing: Option<&'a (usize, String)>,
+    editing: Option<&'a (usize, Input)>,
     message: &'a str,
     demo: bool,
 }
@@ -1150,7 +1275,7 @@ fn sections_of(rows: &[DevRow]) -> Vec<Section> {
     out
 }
 
-fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&(usize, String)>) {
+fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&(usize, Input)>) {
     let sections = sections_of(&t.rows);
     let areas = Layout::vertical(
         sections
@@ -1182,11 +1307,11 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
             ];
 
             if editing_this {
-                // 原地编辑框:值的位置变成输入缓冲 + 光标。
-                let buf = editing.map(|(_, b)| b.clone()).unwrap_or_default();
+                // 原地编辑框:值的位置变成输入框 + 光标。
+                let buf = editing.map(|(_, b)| b.render(true)).unwrap_or_default();
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
-                    format!("{buf}▏"),
+                    buf,
                     Style::default()
                         .bg(Color::LightBlue)
                         .add_modifier(Modifier::BOLD),
@@ -1222,7 +1347,7 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
     // pop 框:居中浮层,画在内容之上。
     if let Some(popup) = &t.popup {
         let w = 56.min(area.width.saturating_sub(4)).max(24);
-        let h = (popup.spec.fields.len() as u16 + 4).min(area.height);
+        let h = (popup.labels.len() as u16 + 4).min(area.height);
         let rect = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -1230,12 +1355,12 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
             height: h,
         };
         f.render_widget(Clear, rect);
-        let block = Block::bordered().title(popup.spec.title);
+        let block = Block::bordered().title(popup.title.clone());
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
         let mut lines: Vec<Line> = Vec::new();
-        for (i, (label, buf)) in popup.spec.fields.iter().enumerate() {
+        for (i, label) in popup.labels.iter().enumerate() {
             let active = i == popup.cur;
             let style = if active {
                 Style::default()
@@ -1250,7 +1375,7 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
                     format!("{label:>6}: "),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("{buf}{}", if active { "▏" } else { "" }), style),
+                Span::styled(popup.render_field(i), style),
             ]));
         }
         lines.push(Line::from(Span::styled(
@@ -1451,5 +1576,67 @@ mod tests {
         .unwrap();
         assert_eq!(m.borrow()["keymap"]["CUSTOM"]["type"], "text");
         apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "bogus").unwrap_err();
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::Input;
+
+    #[test]
+    fn insert_at_cursor_and_move() {
+        let mut i = Input::default();
+        for c in "abc".chars() {
+            i.insert(c);
+        }
+        assert_eq!(i.buf, "abc");
+        i.left();
+        i.insert('X');
+        assert_eq!(i.buf, "abXc");
+        assert_eq!(i.pos, 3);
+    }
+
+    #[test]
+    fn left_at_start_is_noop_and_backspace_removes_before_cursor() {
+        let mut i = Input::with_str("ab");
+        i.left();
+        i.left();
+        i.left();
+        assert_eq!(i.pos, 0);
+        i.insert('X');
+        assert_eq!(i.buf, "Xab");
+        i.backspace();
+        assert_eq!(i.buf, "ab");
+        assert_eq!(i.pos, 0);
+    }
+
+    #[test]
+    fn delete_removes_at_cursor() {
+        let mut i = Input::with_str("abc");
+        i.left();
+        i.delete(); // 删掉 c
+        assert_eq!(i.buf, "ab");
+        i.left();
+        i.delete(); // 删掉 b
+        assert_eq!(i.buf, "a");
+        assert_eq!(i.pos, 1);
+        i.delete(); // 光标在末尾,no-op
+        assert_eq!(i.buf, "a");
+    }
+
+    #[test]
+    fn home_end_and_multibyte() {
+        let mut i = Input::with_str("中文ab");
+        i.home();
+        i.right();
+        i.insert('X');
+        assert_eq!(i.buf, "中X文ab");
+        i.end();
+        assert_eq!(i.pos, i.chars());
+        i.backspace();
+        assert_eq!(i.buf, "中X文a");
+        let rendered = i.render(true);
+        assert!(rendered.starts_with("中X文a▏"));
+        assert_eq!(i.render(false), "中X文a");
     }
 }
