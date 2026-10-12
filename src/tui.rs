@@ -2,11 +2,12 @@
 //! (vibetty / vibekeys 的安装更新)。
 //!
 //! Tab 或 1/2/3 切标签。设备页按功能分节(server / wifi / asr / …),每节只有一条
-//! 上边框带节名;每行是「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框
-//! (Enter 提交、Esc 取消),立即执行的项(如 reset)直接跑。
-//! BLE 和安装动作都是同步阻塞的,执行时先退出 TUI 模式让输出打到正常屏幕,
-//! 结束后再回来(见 `suspend`);设备配置复用 `config_cmd` 的函数,demo 模式
-//! 改内存假数据。
+//! 上边框带节名;每行是「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框,
+//! 复杂输入(加 WiFi)弹居中的 pop 框分字段填写,立即执行的项直接跑。
+//! wifi 节是动态列表:现有网络每条一行(回车改密码,`d` 删除),末尾固定一行
+//! `add +` 弹框新增。BLE 和安装动作都是同步阻塞的,执行时先退出 TUI 模式让输出
+//! 打到正常屏幕,结束后再回来(见 `suspend`);设备配置复用 `config_cmd`,demo
+//! 模式改内存假数据。
 
 use crate::config_cmd::{self, WifiAction};
 use crate::install;
@@ -16,7 +17,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row as TRow, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -151,12 +152,10 @@ fn mock_keymap(mock: &Mock, key: &str, binding: &str) {
     m["keymap"][&physical] = parsed;
 }
 
-/// 可编辑字段:决定回车提交时调用哪个动作。
+/// 可编辑字段:决定行内编辑提交时调用哪个动作。
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
     ServerUrl,
-    WifiAdd,
-    WifiRemove,
     AsrUri,
     AsrApiKey,
     AsrModel,
@@ -166,12 +165,10 @@ enum Field {
     Tailscale,
 }
 
-/// 编辑框的占位提示(底部消息行)。
+/// 编辑框的格式提示。
 fn field_hint(field: Field) -> &'static str {
     match field {
         Field::ServerUrl => "mqtt://user:pass@host:1883",
-        Field::WifiAdd => "ssid password (password 可含空格,空 = 开放网络)",
-        Field::WifiRemove => "ssid",
         Field::AsrUri => "https://…/audio/transcriptions",
         Field::AsrApiKey => "api key",
         Field::AsrModel => "whisper-1",
@@ -199,38 +196,6 @@ fn apply_field(
                 return Ok(());
             }
             config_cmd::server_url(kind, val.to_string(), false)
-        }
-        Field::WifiAdd => {
-            let Some((ssid, pass)) = val.split_once(' ') else {
-                bail!("需要 `ssid password`(空格分隔;密码可含空格则只写 ssid)");
-            };
-            if demo {
-                mock_wifi_add(mock, ssid, pass);
-                println!("wifi `{ssid}' saved (demo)");
-                return Ok(());
-            }
-            config_cmd::wifi(
-                kind,
-                WifiAction::Add {
-                    ssid: ssid.to_string(),
-                    pass: pass.to_string(),
-                },
-                false,
-            )
-        }
-        Field::WifiRemove => {
-            if demo {
-                mock_wifi_remove(mock, val);
-                println!("wifi `{val}' removed (demo)");
-                return Ok(());
-            }
-            config_cmd::wifi(
-                kind,
-                WifiAction::Remove {
-                    ssid: val.to_string(),
-                },
-                false,
-            )
         }
         Field::AsrUri => {
             if demo {
@@ -325,6 +290,53 @@ fn apply_field(
     }
 }
 
+/// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机走一次 BLE。
+fn apply_wifi_add(
+    kind: crate::ble::DeviceKind,
+    demo: bool,
+    mock: &Mock,
+    ssid: &str,
+    pass: &str,
+) -> Result<()> {
+    if ssid.trim().is_empty() {
+        bail!("ssid 不能为空");
+    }
+    if demo {
+        mock_wifi_add(mock, ssid.trim(), pass);
+        println!("wifi `{ssid}' saved (demo)");
+        return Ok(());
+    }
+    config_cmd::wifi(
+        kind,
+        WifiAction::Add {
+            ssid: ssid.trim().to_string(),
+            pass: pass.to_string(),
+        },
+        false,
+    )
+}
+
+/// WiFi 删除。
+fn apply_wifi_remove(
+    kind: crate::ble::DeviceKind,
+    demo: bool,
+    mock: &Mock,
+    ssid: &str,
+) -> Result<()> {
+    if demo {
+        mock_wifi_remove(mock, ssid);
+        println!("wifi `{ssid}' removed (demo)");
+        return Ok(());
+    }
+    config_cmd::wifi(
+        kind,
+        WifiAction::Remove {
+            ssid: ssid.to_string(),
+        },
+        false,
+    )
+}
+
 /// 从 CONFIG 快照取一个字段的展示值(走点路径,缺失 = "")。
 fn cfg_get(v: &serde_json::Value, path: &[&str]) -> String {
     let mut cur = v;
@@ -345,202 +357,44 @@ fn asr_cfg(v: &serde_json::Value, key: &str) -> String {
     cfg_get(v, &["asr_config", key])
 }
 
-/// 每行:所属节 + 标签 + 行为(立即执行 / 行内编辑)+ 当前值。
-enum DevRow {
-    Run {
-        section: &'static str,
-        label: &'static str,
-        run: Rc<dyn Fn() -> Result<()>>,
-        value: Rc<dyn Fn(&serde_json::Value) -> String>,
-    },
-    Edit {
-        section: &'static str,
-        label: &'static str,
-        field: Field,
-        value: Rc<dyn Fn(&serde_json::Value) -> String>,
-    },
+/// pop 框的字段提交动作。
+type Submit = Rc<dyn Fn(&[String]) -> Result<()>>;
+
+/// pop 框定义:标题 + 字段(带初始值)+ 提交动作。
+struct PopupSpec {
+    title: &'static str,
+    fields: Vec<(&'static str, String)>,
+    submit: Submit,
+}
+
+enum RowAction {
+    /// 立即执行(wifi show list / asr clear / reset)。
+    Run(Rc<dyn Fn() -> Result<()>>),
+    /// 行内单行编辑(选中回车,该行变编辑框)。
+    Edit(Field),
+    /// 回车弹 pop 框分字段填写。
+    Popup(PopupSpec),
+    /// 一条现有 WiFi:回车弹框改密码,`d` 删除。
+    WifiEntry { ssid: String },
+}
+
+/// 设备页一行:所属节 + 标签 + 值 + 动作。行随配置快照重建(wifi 列表是动态的)。
+struct DevRow {
+    section: &'static str,
+    label: String,
+    value: String,
+    action: RowAction,
 }
 
 impl DevRow {
-    fn section(&self) -> &'static str {
-        match self {
-            Self::Run { section, .. } | Self::Edit { section, .. } => section,
+    fn edit(section: &'static str, label: &str, field: Field, value: String) -> Self {
+        Self {
+            section,
+            label: label.to_string(),
+            value,
+            action: RowAction::Edit(field),
         }
     }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Run { label, .. } | Self::Edit { label, .. } => label,
-        }
-    }
-
-    fn value(&self, cfg: &serde_json::Value) -> String {
-        match self {
-            Self::Run { value, .. } | Self::Edit { value, .. } => value(cfg),
-        }
-    }
-}
-
-fn device_rows(kind: crate::ble::DeviceKind, demo: bool, mock: Mock) -> Vec<DevRow> {
-    use crate::ble::DeviceKind;
-    let keys = kind == DeviceKind::VibeKeys;
-    let mut v: Vec<DevRow> = Vec::new();
-    let origin = mock;
-
-    v.push(DevRow::Edit {
-        section: "server",
-        label: "server-url",
-        field: Field::ServerUrl,
-        value: Rc::new(|c| cfg_get(c, &["server_url"])),
-    });
-
-    v.push(DevRow::Edit {
-        section: "wifi",
-        label: "add (ssid pass)",
-        field: Field::WifiAdd,
-        value: Rc::new(|_| String::new()),
-    });
-    v.push(DevRow::Edit {
-        section: "wifi",
-        label: "remove (ssid)",
-        field: Field::WifiRemove,
-        value: Rc::new(|_| String::new()),
-    });
-    let mock = origin.clone();
-    v.push(DevRow::Run {
-        section: "wifi",
-        label: "show list",
-        run: Rc::new(move || {
-            if demo {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
-                );
-                return Ok(());
-            }
-            config_cmd::wifi(kind, WifiAction::Show, false)
-        }),
-        value: Rc::new(|c| match c.get("wifi_list").and_then(|v| v.as_array()) {
-            Some(arr) => format!(
-                "{} network(s): {}",
-                arr.len(),
-                arr.iter()
-                    .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            None => String::new(),
-        }),
-    });
-
-    v.push(DevRow::Edit {
-        section: "asr",
-        label: "uri",
-        field: Field::AsrUri,
-        value: Rc::new(|c| asr_cfg(c, "uri")),
-    });
-    v.push(DevRow::Edit {
-        section: "asr",
-        label: "api-key",
-        field: Field::AsrApiKey,
-        value: Rc::new(|c| asr_cfg(c, "api_key")),
-    });
-    v.push(DevRow::Edit {
-        section: "asr",
-        label: "model",
-        field: Field::AsrModel,
-        value: Rc::new(|c| asr_cfg(c, "model")),
-    });
-    let mock = origin.clone();
-    v.push(DevRow::Run {
-        section: "asr",
-        label: "clear",
-        run: Rc::new(move || {
-            if demo {
-                mock_patch(
-                    &mock,
-                    "asr_config",
-                    serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
-                );
-                println!("asr_config cleared (demo)");
-                return Ok(());
-            }
-            config_cmd::asr(
-                kind,
-                config_cmd::AsrOpts {
-                    uri: None,
-                    api_key: None,
-                    model: None,
-                    clean: true,
-                },
-                false,
-            )
-        }),
-        value: Rc::new(|_| String::new()),
-    });
-
-    if keys {
-        v.push(DevRow::Edit {
-            section: "keyboard",
-            label: "mic-model",
-            field: Field::MicModel,
-            value: Rc::new(|c| match c.get("mic_model").and_then(|v| v.as_u64()) {
-                Some(0) => "ptt".into(),
-                Some(1) => "toggle".into(),
-                _ => String::new(),
-            }),
-        });
-        v.push(DevRow::Edit {
-            section: "keyboard",
-            label: "prefer-asr",
-            field: Field::PreferAsr,
-            value: Rc::new(
-                |c| match c.get("prefer_builtin_asr").and_then(|v| v.as_bool()) {
-                    Some(true) => "on".into(),
-                    Some(false) => "off".into(),
-                    _ => String::new(),
-                },
-            ),
-        });
-        v.push(DevRow::Edit {
-            section: "keyboard",
-            label: "keymap (KEY=BINDING)",
-            field: Field::Keymap,
-            value: Rc::new(|c| match c.get("keymap").and_then(|v| v.as_object()) {
-                Some(m) if !m.is_empty() => {
-                    let pairs: Vec<String> =
-                        m.iter().map(|(k, val)| format!("{k}={val}")).collect();
-                    pairs.join("  ")
-                }
-                _ => String::new(),
-            }),
-        });
-    }
-
-    v.push(DevRow::Edit {
-        section: "device",
-        label: "tailscale: bind",
-        field: Field::Tailscale,
-        value: Rc::new(|c| {
-            // 真机快照不含 tailscale_key(仅写);demo 里改过才显示。
-            let v = cfg_get(c, &["tailscale_key"]);
-            if v.is_empty() { v } else { "(set)".into() }
-        }),
-    });
-    v.push(DevRow::Run {
-        section: "device",
-        label: "reset device",
-        run: Rc::new(move || {
-            if demo {
-                println!("device rebooting (demo)");
-                return Ok(());
-            }
-            config_cmd::reset(kind)
-        }),
-        value: Rc::new(|_| String::new()),
-    });
-
-    v
 }
 
 struct DeviceTab {
@@ -551,28 +405,240 @@ struct DeviceTab {
     /// demo 模式:不碰 BLE,动作改内存里的假配置。
     demo: bool,
     mock: Mock,
-    /// 行内编辑:选中行下标 + 当前输入。None = 浏览模式。
+    /// 行内编辑:选中行下标 + 当前输入。
     editing: Option<(usize, String)>,
+    /// 打开的 pop 框。
+    popup: Option<PopupState>,
+}
+
+/// 运行中的 pop 框。
+struct PopupState {
+    spec: PopupSpec,
+    cur: usize,
 }
 
 impl DeviceTab {
     fn new(kind: crate::ble::DeviceKind, demo: bool) -> Self {
         let mock = Rc::new(std::cell::RefCell::new(sample_config(kind)));
-        let rows = device_rows(kind, demo, mock.clone());
-        Self {
+        let mut t = Self {
             kind,
             config: None,
-            rows,
+            rows: Vec::new(),
             sel: 0,
             demo,
             mock,
             editing: None,
+            popup: None,
+        };
+        t.rebuild_rows();
+        t
+    }
+
+    /// 按当前配置快照重建行(wifi 列表是动态的,其余节的值也一并刷新)。
+    fn rebuild_rows(&mut self) {
+        let empty = serde_json::json!({});
+        let cfg = self.config.as_ref().unwrap_or(&empty);
+        let kind = self.kind;
+        let demo = self.demo;
+        let keys = kind == crate::ble::DeviceKind::VibeKeys;
+        let mut rows: Vec<DevRow> = Vec::new();
+
+        rows.push(DevRow::edit(
+            "server",
+            "server-url",
+            Field::ServerUrl,
+            cfg_get(cfg, &["server_url"]),
+        ));
+
+        // wifi:现有网络每条一行(回车改密码,d 删除),末尾固定 add +。
+        for e in cfg
+            .get("wifi_list")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
+            let ssid = e
+                .get("ssid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pass = e
+                .get("pass")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            rows.push(DevRow {
+                section: "wifi",
+                label: ssid.clone(),
+                value: if pass.is_empty() {
+                    "(open)".into()
+                } else {
+                    "••••••".into()
+                },
+                action: RowAction::WifiEntry { ssid: ssid.clone() },
+            });
         }
+        let submit: Submit = {
+            let mock = self.mock.clone();
+            Rc::new(move |vals| {
+                apply_wifi_add(
+                    kind,
+                    demo,
+                    &mock,
+                    vals.first().map(String::as_str).unwrap_or(""),
+                    vals.get(1).map(String::as_str).unwrap_or(""),
+                )
+            })
+        };
+        rows.push(DevRow {
+            section: "wifi",
+            label: "add +".into(),
+            value: String::new(),
+            action: RowAction::Popup(PopupSpec {
+                title: " add wifi ",
+                fields: vec![("ssid", String::new()), ("pass", String::new())],
+                submit,
+            }),
+        });
+        let mock = self.mock.clone();
+        rows.push(DevRow {
+            section: "wifi",
+            label: "show list".into(),
+            value: match cfg.get("wifi_list").and_then(|v| v.as_array()) {
+                Some(arr) => format!(
+                    "{} network(s): {}",
+                    arr.len(),
+                    arr.iter()
+                        .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => String::new(),
+            },
+            action: RowAction::Run(Rc::new(move || {
+                if demo {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
+                    );
+                    return Ok(());
+                }
+                config_cmd::wifi(kind, WifiAction::Show, false)
+            })),
+        });
+
+        rows.push(DevRow::edit(
+            "asr",
+            "uri",
+            Field::AsrUri,
+            asr_cfg(cfg, "uri"),
+        ));
+        rows.push(DevRow::edit(
+            "asr",
+            "api-key",
+            Field::AsrApiKey,
+            asr_cfg(cfg, "api_key"),
+        ));
+        rows.push(DevRow::edit(
+            "asr",
+            "model",
+            Field::AsrModel,
+            asr_cfg(cfg, "model"),
+        ));
+        let mock = self.mock.clone();
+        rows.push(DevRow {
+            section: "asr",
+            label: "clear".into(),
+            value: String::new(),
+            action: RowAction::Run(Rc::new(move || {
+                if demo {
+                    mock_patch(
+                        &mock,
+                        "asr_config",
+                        serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
+                    );
+                    println!("asr_config cleared (demo)");
+                    return Ok(());
+                }
+                config_cmd::asr(
+                    kind,
+                    config_cmd::AsrOpts {
+                        uri: None,
+                        api_key: None,
+                        model: None,
+                        clean: true,
+                    },
+                    false,
+                )
+            })),
+        });
+
+        if keys {
+            rows.push(DevRow::edit(
+                "keyboard",
+                "mic-model",
+                Field::MicModel,
+                match cfg.get("mic_model").and_then(|v| v.as_u64()) {
+                    Some(0) => "ptt".into(),
+                    Some(1) => "toggle".into(),
+                    _ => String::new(),
+                },
+            ));
+            rows.push(DevRow::edit(
+                "keyboard",
+                "prefer-asr",
+                Field::PreferAsr,
+                match cfg.get("prefer_builtin_asr").and_then(|v| v.as_bool()) {
+                    Some(true) => "on".into(),
+                    Some(false) => "off".into(),
+                    _ => String::new(),
+                },
+            ));
+            rows.push(DevRow::edit(
+                "keyboard",
+                "keymap (KEY=BINDING)",
+                Field::Keymap,
+                match cfg.get("keymap").and_then(|v| v.as_object()) {
+                    Some(m) if !m.is_empty() => m
+                        .iter()
+                        .map(|(k, val)| format!("{k}={val}"))
+                        .collect::<Vec<_>>()
+                        .join("  "),
+                    _ => String::new(),
+                },
+            ));
+        }
+
+        rows.push(DevRow::edit(
+            "device",
+            "tailscale: bind",
+            Field::Tailscale,
+            {
+                // 真机快照不含 tailscale_key(仅写);demo 里改过才显示。
+                let v = cfg_get(cfg, &["tailscale_key"]);
+                if v.is_empty() { v } else { "(set)".into() }
+            },
+        ));
+        rows.push(DevRow {
+            section: "device",
+            label: "reset device".into(),
+            value: String::new(),
+            action: RowAction::Run(Rc::new(move || {
+                if demo {
+                    println!("device rebooting (demo)");
+                    return Ok(());
+                }
+                config_cmd::reset(kind)
+            })),
+        });
+
+        self.sel = self.sel.min(rows.len() - 1);
+        self.rows = rows;
     }
 
     fn load_config(&mut self, terminal: &mut DefaultTerminal) {
         if self.demo {
             self.config = Some(self.mock.borrow().clone());
+            self.rebuild_rows();
             return;
         }
         let kind = self.kind;
@@ -580,7 +646,10 @@ impl DeviceTab {
             crate::ble::with_device(kind, |p| async move { crate::ble::read_config(&p).await })
         });
         match res {
-            Ok(cfg) => self.config = Some(cfg),
+            Ok(cfg) => {
+                self.config = Some(cfg);
+                self.rebuild_rows();
+            }
             Err(_) => self.config = None,
         }
     }
@@ -662,8 +731,55 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
             continue;
         }
 
-        // 设备页的行内编辑独占按键。
-        if tab != Tab::Pkgs && keys_tab.editing.is_some() || watch_tab.editing.is_some() {
+        // ---- pop 框独占按键 ----
+        let popup_open = keys_tab.popup.is_some() || watch_tab.popup.is_some();
+        if popup_open {
+            let t = if keys_tab.popup.is_some() {
+                &mut keys_tab
+            } else {
+                &mut watch_tab
+            };
+            let Some(popup) = t.popup.as_mut() else {
+                unreachable!()
+            };
+            match key.code {
+                KeyCode::Esc => {
+                    t.popup = None;
+                    message = "cancelled".into();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    popup.cur = (popup.cur + 1) % popup.spec.fields.len();
+                }
+                KeyCode::Up => {
+                    popup.cur = (popup.cur + popup.spec.fields.len() - 1) % popup.spec.fields.len();
+                }
+                KeyCode::Backspace => {
+                    popup.spec.fields[popup.cur].1.pop();
+                }
+                KeyCode::Enter => {
+                    if popup.cur + 1 < popup.spec.fields.len() {
+                        popup.cur += 1;
+                    } else {
+                        let state = t.popup.take().unwrap();
+                        let vals: Vec<String> =
+                            state.spec.fields.iter().map(|(_, b)| b.clone()).collect();
+                        let res = suspend(&mut terminal, || (state.spec.submit)(&vals));
+                        message =
+                            format!("{}: {}", state.spec.title.trim(), describe(&res, dry_run));
+                        if res.is_ok() && !dry_run {
+                            t.load_config(&mut terminal);
+                        }
+                    }
+                }
+                KeyCode::Char(c) => popup.spec.fields[popup.cur].1.push(c),
+                _ => {}
+            }
+            continue;
+        }
+
+        // ---- 行内编辑独占按键 ----
+        let editing_open = keys_tab.editing.is_some() || watch_tab.editing.is_some();
+        if editing_open {
             let t = if keys_tab.editing.is_some() {
                 &mut keys_tab
             } else {
@@ -679,10 +795,11 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 }
                 KeyCode::Enter => {
                     let (idx, val) = t.editing.take().unwrap();
-                    let (label, field) = match &t.rows[idx] {
-                        DevRow::Edit { label, field, .. } => (*label, *field),
-                        DevRow::Run { .. } => unreachable!(),
+                    let field = match &t.rows[idx].action {
+                        RowAction::Edit(f) => *f,
+                        _ => unreachable!(),
                     };
+                    let label = t.rows[idx].label.clone();
                     let (mock, kind) = (t.mock.clone(), t.kind);
                     let res = suspend(&mut terminal, || {
                         apply_field(kind, demo, &mock, field, &val)
@@ -759,6 +876,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 Tab::Watch => watch_tab.load_config(&mut terminal),
                 Tab::Pkgs => {
                     message = "refreshing…".into();
+                    let editing = None;
                     terminal.draw(|f| {
                         ui(
                             f,
@@ -769,7 +887,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                                 pkgs: &pkg_entries,
                                 pkg_sel,
                                 allow_pre,
-                                editing: None,
+                                editing,
                                 message: &message,
                                 demo,
                             },
@@ -779,6 +897,23 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     message = "refreshed".into();
                 }
             },
+            KeyCode::Char('d') if tab != Tab::Pkgs => {
+                let t = if tab == Tab::Keys {
+                    &mut keys_tab
+                } else {
+                    &mut watch_tab
+                };
+                if let RowAction::WifiEntry { ssid } = &t.rows[t.sel].action {
+                    let (mock, kind, ssid) = (t.mock.clone(), t.kind, ssid.clone());
+                    let res = suspend(&mut terminal, || {
+                        apply_wifi_remove(kind, demo, &mock, &ssid)
+                    });
+                    message = format!("wifi {ssid}: {}", describe(&res, dry_run));
+                    if res.is_ok() && !dry_run {
+                        t.load_config(&mut terminal);
+                    }
+                }
+            }
             KeyCode::Enter => match tab {
                 Tab::Keys | Tab::Watch => {
                     let t = if tab == Tab::Keys {
@@ -789,18 +924,63 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     if t.config.is_none() {
                         t.load_config(&mut terminal);
                     }
-                    match &t.rows[t.sel] {
-                        DevRow::Run { label, run, .. } => {
-                            let (label, run) = (*label, run.clone());
+                    match &t.rows[t.sel].action {
+                        RowAction::Run(run) => {
+                            let run = run.clone();
+                            let label = t.rows[t.sel].label.clone();
                             let res = suspend(&mut terminal, || run());
                             message = format!("{label}: {}", describe(&res, dry_run));
                             if res.is_ok() && !dry_run {
                                 t.load_config(&mut terminal);
                             }
                         }
-                        DevRow::Edit { .. } => {
+                        RowAction::Edit(_) => {
                             t.editing = Some((t.sel, String::new()));
                             message = "editing — Enter save · Esc cancel".into();
+                        }
+                        RowAction::Popup(spec) => {
+                            let spec = PopupSpec {
+                                title: spec.title,
+                                fields: spec.fields.clone(),
+                                submit: spec.submit.clone(),
+                            };
+                            t.popup = Some(PopupState { spec, cur: 0 });
+                            message = "Tab/↑↓ field · Enter save · Esc cancel".into();
+                        }
+                        RowAction::WifiEntry { ssid } => {
+                            // 从快照里拿当前密码,弹框改;提交 = 同 ssid 覆盖。
+                            let pass = t
+                                .config
+                                .as_ref()
+                                .and_then(|c| c.get("wifi_list").and_then(|v| v.as_array()))
+                                .and_then(|arr| {
+                                    arr.iter().find(|e| {
+                                        e.get("ssid").and_then(|v| v.as_str()) == Some(ssid)
+                                    })
+                                })
+                                .and_then(|e| e.get("pass"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let (mock, kind, ssid) = (t.mock.clone(), t.kind, ssid.clone());
+                            let submit: Submit = Rc::new(move |vals| {
+                                apply_wifi_add(
+                                    kind,
+                                    demo,
+                                    &mock,
+                                    &ssid,
+                                    vals.first().map(String::as_str).unwrap_or(""),
+                                )
+                            });
+                            t.popup = Some(PopupState {
+                                spec: PopupSpec {
+                                    title: " wifi: change password ",
+                                    fields: vec![("pass", pass)],
+                                    submit,
+                                },
+                                cur: 0,
+                            });
+                            message = "Enter save · Esc cancel".into();
                         }
                     }
                 }
@@ -985,9 +1165,9 @@ fn sections_of(rows: &[DevRow]) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         match out.last_mut() {
-            Some(s) if s.name == row.section() => s.len += 1,
+            Some(s) if s.name == row.section => s.len += 1,
             _ => out.push(Section {
-                name: row.section(),
+                name: row.section,
                 start: i,
                 len: 1,
             }),
@@ -1021,7 +1201,10 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
             let editing_this = editing.is_some_and(|(idx, _)| *idx == i);
             let mut spans = vec![
                 Span::raw("  "),
-                Span::styled(row.label(), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    row.label.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
             ];
 
             if editing_this {
@@ -1029,21 +1212,27 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
                 let buf = editing.map(|(_, b)| b.clone()).unwrap_or_default();
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
-                    format!("{}▏", buf),
+                    format!("{buf}▏"),
                     Style::default()
                         .bg(Color::LightBlue)
                         .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(
-                    format!("  ({})", field_hint(row_field(row))),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else {
-                let val = t.config.as_ref().map(|c| row.value(c)).unwrap_or_default();
-                if !val.is_empty() {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(val, Style::default().fg(Color::Gray)));
+                let hint = match &row.action {
+                    RowAction::Edit(field) => field_hint(*field),
+                    _ => "",
+                };
+                if !hint.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  ({hint})"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
+            } else if !row.value.is_empty() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    row.value.clone(),
+                    Style::default().fg(Color::Gray),
+                ));
             }
 
             let line = Line::from(spans);
@@ -1055,12 +1244,46 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
-}
 
-fn row_field(row: &DevRow) -> Field {
-    match row {
-        DevRow::Edit { field, .. } => *field,
-        DevRow::Run { .. } => unreachable!("edit box on a Run row"),
+    // pop 框:居中浮层,画在内容之上。
+    if let Some(popup) = &t.popup {
+        let w = 56.min(area.width.saturating_sub(4)).max(24);
+        let h = (popup.spec.fields.len() as u16 + 4).min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let block = Block::bordered().title(popup.spec.title);
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, (label, buf)) in popup.spec.fields.iter().enumerate() {
+            let active = i == popup.cur;
+            let style = if active {
+                Style::default()
+                    .bg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("{label:>6}: "),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{buf}{}", if active { "▏" } else { "" }), style),
+            ]));
+        }
+        lines.push(Line::from(Span::styled(
+            " Tab/↑↓ field · Enter save · Esc cancel ",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(Paragraph::new(lines), inner);
     }
 }
 
@@ -1143,6 +1366,13 @@ mod tests {
         Rc::new(std::cell::RefCell::new(sample_config(DeviceKind::VibeKeys)))
     }
 
+    fn tab() -> DeviceTab {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.config = Some(t.mock.borrow().clone());
+        t.rebuild_rows();
+        t
+    }
+
     #[test]
     fn sample_config_has_device_specific_fields() {
         let keys = sample_config(DeviceKind::VibeKeys);
@@ -1195,11 +1425,40 @@ mod tests {
 
     #[test]
     fn sections_group_consecutive_rows() {
-        let rows = device_rows(DeviceKind::VibeKeys, true, mock());
-        let secs = sections_of(&rows);
+        let t = tab();
+        let secs = sections_of(&t.rows);
         let names: Vec<&str> = secs.iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["server", "wifi", "asr", "keyboard", "device"]);
-        assert_eq!(secs.iter().map(|s| s.len).sum::<usize>(), rows.len());
+        assert_eq!(secs.iter().map(|s| s.len).sum::<usize>(), t.rows.len());
+    }
+
+    #[test]
+    fn wifi_rows_are_dynamic_with_add_row_last() {
+        let t = tab();
+        let wifi: Vec<&DevRow> = t.rows.iter().filter(|r| r.section == "wifi").collect();
+        // 2 条现有网络 + add + + show list
+        assert_eq!(wifi.len(), 4);
+        assert_eq!(wifi[0].label, "Home");
+        assert_eq!(wifi[1].label, "Office");
+        assert_eq!(wifi[2].label, "add +");
+        assert_eq!(wifi[3].label, "show list");
+        // 现有网络 = WifiEntry(回车改密码,d 删除);add + = Popup。
+        assert!(matches!(&wifi[0].action, RowAction::WifiEntry { ssid } if ssid == "Home"));
+        assert!(matches!(wifi[2].action, RowAction::Popup(_)));
+    }
+
+    #[test]
+    fn wifi_pass_edit_popup_upserts_same_ssid() {
+        let t = tab();
+        // 第一条 wifi 行(Home)的改密码 pop 框提交 → 同 ssid 更新,不新增。
+        let rows_after = t.rows.len();
+        apply_wifi_add(DeviceKind::VibeKeys, true, &t.mock, "Home", "new-pass").unwrap();
+        let m = t.mock.borrow();
+        let list = m["wifi_list"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["pass"], "new-pass");
+        drop(m);
+        assert_eq!(t.rows.len(), rows_after);
     }
 
     #[test]
@@ -1209,10 +1468,6 @@ mod tests {
         assert_eq!(m.borrow()["server_url"], "mqtt://x");
         apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "ptt").unwrap();
         assert_eq!(m.borrow()["mic_model"], 0);
-        apply_field(DeviceKind::VibeKeys, true, &m, Field::WifiAdd, "Cafe pw 1").unwrap();
-        let list = m.borrow()["wifi_list"].clone();
-        assert_eq!(list.as_array().unwrap().len(), 3);
-        assert_eq!(list.as_array().unwrap()[2]["pass"], "pw 1");
         apply_field(
             DeviceKind::VibeKeys,
             true,
