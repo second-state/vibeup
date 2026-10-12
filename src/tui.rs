@@ -1672,12 +1672,12 @@ mod input_tests {
         assert_eq!(i.pos, i.chars());
         i.backspace();
         assert_eq!(i.buf, "中X文a");
-        // 块状光标:反显包住光标处字符;不在编辑态时只有整段文本。
+        // 块状光标:反显包住光标处字符;光标在末尾时是色块占位。
+        // 不在编辑态时只有整段文本。
         let spans = i.spans(true, Style::default());
-        assert_eq!(spans.len(), 3);
+        assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].content, "中X文a");
-        assert_eq!(spans[1].content, "b");
-        assert_eq!(spans[2].content, "");
+        assert_eq!(spans[1].content, " ");
         let plain = i.spans(false, Style::default());
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].content, "中X文ab");
