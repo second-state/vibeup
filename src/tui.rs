@@ -209,6 +209,8 @@ struct DeviceTab {
     config: Option<serde_json::Value>,
     actions: Vec<Action>,
     sel: usize,
+    /// 按钮网格的列数,渲染时算出、按键导航用(Cell 是因为 ui() 只拿得到 &Self)。
+    grid_cols: std::cell::Cell<usize>,
 }
 
 impl DeviceTab {
@@ -218,6 +220,7 @@ impl DeviceTab {
             config: None,
             actions: device_actions(kind),
             sel: 0,
+            grid_cols: std::cell::Cell::new(1),
         }
     }
 
@@ -442,20 +445,50 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
                 message = default_message(tab);
             }
             KeyCode::Char('j') | KeyCode::Down => match tab {
-                Tab::Keys => keys_tab.sel = (keys_tab.sel + 1) % keys_tab.actions.len(),
-                Tab::Watch => watch_tab.sel = (watch_tab.sel + 1) % watch_tab.actions.len(),
+                // 按钮网格里 = 向下移动一行;包列表 = 下一行。
+                Tab::Keys | Tab::Watch => {
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
+                    };
+                    let cols = t.grid_cols.get();
+                    t.sel = (t.sel + cols).min(t.actions.len() - 1);
+                }
                 Tab::Pkgs => pkg_sel = (pkg_sel + 1) % pkg_entries.len(),
             },
             KeyCode::Char('k') | KeyCode::Up => match tab {
-                Tab::Keys => {
-                    keys_tab.sel =
-                        (keys_tab.sel + keys_tab.actions.len() - 1) % keys_tab.actions.len()
-                }
-                Tab::Watch => {
-                    watch_tab.sel =
-                        (watch_tab.sel + watch_tab.actions.len() - 1) % watch_tab.actions.len()
+                Tab::Keys | Tab::Watch => {
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
+                    };
+                    t.sel = t.sel.saturating_sub(t.grid_cols.get());
                 }
                 Tab::Pkgs => pkg_sel = (pkg_sel + pkg_entries.len() - 1) % pkg_entries.len(),
+            },
+            KeyCode::Char('l') | KeyCode::Right => match tab {
+                Tab::Keys | Tab::Watch => {
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
+                    };
+                    t.sel = (t.sel + 1).min(t.actions.len() - 1);
+                }
+                Tab::Pkgs => {}
+            },
+            KeyCode::Char('h') | KeyCode::Left => match tab {
+                Tab::Keys | Tab::Watch => {
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
+                    };
+                    t.sel = t.sel.saturating_sub(1);
+                }
+                Tab::Pkgs => {}
             },
             KeyCode::Char('p') => {
                 allow_pre = !allow_pre;
@@ -693,28 +726,54 @@ fn ui(f: &mut Frame, r: UiRefs) {
 }
 
 fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, input: Option<&InputState>) {
-    // 摘要块高度随行数走:写死会在没读到配置(1 行)时留一大段空白。
-    let summary: Vec<Line> = t.summary().into_iter().map(Line::from).collect();
-    let [head, list] =
-        Layout::vertical([Constraint::Length(summary.len() as u16), Constraint::Min(0)])
-            .areas(area);
-    f.render_widget(Paragraph::new(summary), head);
+    // 像 HTML 卡片一样的一整块:边框 + 标题,摘要在上,动作按钮流式换行填满宽度。
+    let device_title = match t.kind {
+        crate::ble::DeviceKind::VibeKeys => " VibeKeys ",
+        crate::ble::DeviceKind::Watch => " VibeWatch ",
+    };
+    let block = ratatui::widgets::Block::bordered().title(device_title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    let rows: Vec<TRow> = t
+    // 摘要:卡片顶部,高度随行数走。
+    let summary: Vec<Line> = t.summary().into_iter().map(Line::from).collect();
+    let [sum_area, grid_area] =
+        Layout::vertical([Constraint::Length(summary.len() as u16), Constraint::Min(0)])
+            .areas(inner);
+    f.render_widget(Paragraph::new(summary), sum_area);
+
+    // 按钮网格(flex-wrap):等宽格子,放不下的换行,填满卡片宽度。
+    let cell_w = t
         .actions
         .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            let style = if i == t.sel {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-            TRow::new([Cell::from(a.label)]).style(style)
-        })
-        .collect();
-    let table = Table::new(rows, [Constraint::Percentage(100)]);
-    f.render_widget(table, list);
+        .map(|a| a.label.len() + 3) // 两侧各 1 格 padding + 1 格间隔
+        .max()
+        .unwrap_or(1) as u16;
+    let cols = ((grid_area.width / cell_w) as usize).max(1);
+    t.grid_cols.set(cols);
+    for (i, a) in t.actions.iter().enumerate() {
+        let (row, col) = ((i / cols) as u16, (i % cols) as u16);
+        let x = grid_area.x + col * cell_w;
+        let y = grid_area.y + row;
+        if y >= grid_area.bottom() || x >= grid_area.right() {
+            break; // 卡片高度不够放完就停(动作不会多到放不下)
+        }
+        let w = (cell_w - 1).min(grid_area.right() - x);
+        let rect = Rect {
+            x,
+            y,
+            width: w,
+            height: 1,
+        };
+        let style = if i == t.sel {
+            Style::default()
+                .bg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(Color::DarkGray)
+        };
+        f.render_widget(Paragraph::new(format!(" {} ", a.label)).style(style), rect);
+    }
     let _ = input;
 }
 
