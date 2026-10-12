@@ -839,14 +839,12 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 }
                 KeyCode::Backspace => popup.inputs[popup.cur].backspace(),
                 KeyCode::Delete => popup.inputs[popup.cur].delete(),
-                KeyCode::Left | KeyCode::Char('h')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Left => popup.inputs[popup.cur].left(),
+                KeyCode::Right => popup.inputs[popup.cur].right(),
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     popup.inputs[popup.cur].left();
                 }
-                KeyCode::Right | KeyCode::Char('l')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     popup.inputs[popup.cur].right();
                 }
                 KeyCode::Home => popup.inputs[popup.cur].home(),
@@ -905,14 +903,12 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 }
                 KeyCode::Backspace => input.backspace(),
                 KeyCode::Delete => input.delete(),
-                KeyCode::Left | KeyCode::Char('h')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Left => input.left(),
+                KeyCode::Right => input.right(),
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     input.left();
                 }
-                KeyCode::Right | KeyCode::Char('l')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     input.right();
                 }
                 KeyCode::Home => input.home(),
