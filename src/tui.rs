@@ -693,8 +693,11 @@ fn ui(f: &mut Frame, r: UiRefs) {
 }
 
 fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, input: Option<&InputState>) {
-    let [head, list] = Layout::vertical([Constraint::Length(6), Constraint::Min(0)]).areas(area);
+    // 摘要块高度随行数走:写死会在没读到配置(1 行)时留一大段空白。
     let summary: Vec<Line> = t.summary().into_iter().map(Line::from).collect();
+    let [head, list] =
+        Layout::vertical([Constraint::Length(summary.len() as u16), Constraint::Min(0)])
+            .areas(area);
     f.render_widget(Paragraph::new(summary), head);
 
     let rows: Vec<TRow> = t
