@@ -437,13 +437,35 @@ impl Input {
         self.buf.replace_range(b..b + c.len_utf8(), "");
     }
 
-    /// 渲染;`cursor` 时把光标(▏)画在当前位置。
-    fn render(&self, cursor: bool) -> String {
+    /// 渲染为 spans。`cursor` 时光标处字符用反显(粗块光标)包住;光标在末尾时
+    /// 画一个反显空格块。
+    fn spans(&self, cursor: bool, base: Style) -> Vec<Span<'static>> {
         if !cursor {
-            return self.buf.clone();
+            return vec![Span::styled(self.buf.clone(), base)];
         }
         let b = self.byte_pos();
-        format!("{}▏{}", &self.buf[..b], &self.buf[b..])
+        let mut spans = vec![Span::styled(self.buf[..b].to_string(), base)];
+        match self.buf[b..].chars().next() {
+            Some(c) => spans.push(Span::styled(
+                c.to_string(),
+                base.add_modifier(Modifier::REVERSED)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            None => spans.push(Span::styled(
+                " ",
+                base.bg(Color::LightBlue).add_modifier(Modifier::BOLD),
+            )),
+        }
+        spans.push(Span::styled(
+            self.buf[b + self.buf[b..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0)..]
+                .to_string(),
+            base,
+        ));
+        spans
     }
 }
 
@@ -522,8 +544,24 @@ impl PopupState {
         }
     }
 
-    fn render_field(&self, i: usize) -> String {
-        self.inputs[i].render(i == self.cur)
+    /// 当前字段的光标 overlay(反显粗块,包住光标处字符;末尾则是色块)。
+    fn cursor_spans(&self, i: usize, base: Style) -> Vec<Span<'static>> {
+        if i != self.cur {
+            return vec![];
+        }
+        let input = &self.inputs[i];
+        let b = input.byte_pos();
+        match input.buf[b..].chars().next() {
+            Some(c) => vec![Span::styled(
+                c.to_string(),
+                base.add_modifier(Modifier::REVERSED)
+                    .add_modifier(Modifier::BOLD),
+            )],
+            None => vec![Span::styled(
+                " ",
+                base.bg(Color::LightBlue).add_modifier(Modifier::BOLD),
+            )],
+        }
     }
 }
 
@@ -1304,15 +1342,14 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
             ];
 
             if editing_this {
-                // 原地编辑框:值的位置变成输入框 + 光标。
-                let buf = editing.map(|(_, b)| b.render(true)).unwrap_or_default();
+                // 原地编辑框:值的位置变成输入框 + 块状光标。
+                let edit_style = Style::default()
+                    .bg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD);
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    buf,
-                    Style::default()
-                        .bg(Color::LightBlue)
-                        .add_modifier(Modifier::BOLD),
-                ));
+                if let Some((_, input)) = editing {
+                    spans.extend(input.spans(true, edit_style));
+                }
                 let hint = match &row.action {
                     RowAction::Edit(field) => field_hint(*field),
                     _ => "",
@@ -1366,14 +1403,16 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
             } else {
                 Style::default()
             };
-            lines.push(Line::from(vec![
+            let mut line_spans = vec![
                 Span::raw(" "),
                 Span::styled(
                     format!("{label:>6}: "),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(popup.render_field(i), style),
-            ]));
+                Span::styled(popup.inputs[i].buf.clone(), style),
+            ];
+            line_spans.extend(popup.cursor_spans(i, style));
+            lines.push(Line::from(line_spans));
         }
         lines.push(Line::from(Span::styled(
             " Tab/↑↓ field · Enter save · Esc cancel ",
@@ -1632,8 +1671,14 @@ mod input_tests {
         assert_eq!(i.pos, i.chars());
         i.backspace();
         assert_eq!(i.buf, "中X文a");
-        let rendered = i.render(true);
-        assert!(rendered.starts_with("中X文a▏"));
-        assert_eq!(i.render(false), "中X文a");
+        // 块状光标:反显包住光标处字符;不在编辑态时只有整段文本。
+        let spans = i.spans(true, Style::default());
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "中X文a");
+        assert_eq!(spans[1].content, "b");
+        assert_eq!(spans[2].content, "");
+        let plain = i.spans(false, Style::default());
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].content, "中X文ab");
     }
 }
