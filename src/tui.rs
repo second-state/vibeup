@@ -446,25 +446,19 @@ impl Input {
         let b = self.byte_pos();
         let mut spans = vec![Span::styled(self.buf[..b].to_string(), base)];
         match self.buf[b..].chars().next() {
-            Some(c) => spans.push(Span::styled(
-                c.to_string(),
-                base.add_modifier(Modifier::REVERSED)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Some(c) => {
+                spans.push(Span::styled(
+                    c.to_string(),
+                    base.add_modifier(Modifier::REVERSED)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(self.buf[b + c.len_utf8()..].to_string(), base));
+            }
             None => spans.push(Span::styled(
                 " ",
                 base.bg(Color::LightBlue).add_modifier(Modifier::BOLD),
             )),
         }
-        spans.push(Span::styled(
-            self.buf[b + self.buf[b..]
-                .chars()
-                .next()
-                .map(|c| c.len_utf8())
-                .unwrap_or(0)..]
-                .to_string(),
-            base,
-        ));
         spans
     }
 }
@@ -1680,6 +1674,6 @@ mod input_tests {
         assert_eq!(spans[1].content, " ");
         let plain = i.spans(false, Style::default());
         assert_eq!(plain.len(), 1);
-        assert_eq!(plain[0].content, "中X文ab");
+        assert_eq!(plain[0].content, "中X文a");
     }
 }
