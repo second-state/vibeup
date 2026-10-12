@@ -53,7 +53,11 @@ enum Cmd {
         cmd: ConfigCmd,
     },
     /// 打开 TUI 面板
-    Tui,
+    Tui {
+        /// 设备标签用假数据(无真机时演示/开发用)
+        #[arg(long)]
+        demo: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -159,7 +163,7 @@ fn main() -> Result<()> {
             install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()))
         }
         Cmd::Config { cmd } => run_config(cmd),
-        Cmd::Tui => tui::run(cli.dir, cli.dry_run),
+        Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
     }
 }
 

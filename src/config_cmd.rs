@@ -222,7 +222,7 @@ async fn maybe_reset(p: &Peripheral, reset: bool) -> Result<()> {
 // ===== 键位 binding 解析(移植自 vibekeys_app)=====
 
 /// 用户-facing 键名 → 物理键名,含 `YOLO` → `SWITCH` 别名。
-fn physical_key_name(key: &str) -> String {
+pub(crate) fn physical_key_name(key: &str) -> String {
     let key_upper = key.to_uppercase();
     if key_upper == "YOLO" {
         "SWITCH".to_string()
@@ -237,7 +237,7 @@ fn build_keymap_config(key: &str, binding: &str) -> String {
     serde_json::json!({ physical_key_name(key): parse_key_binding(binding) }).to_string()
 }
 
-fn parse_key_binding(input: &str) -> serde_json::Value {
+pub(crate) fn parse_key_binding(input: &str) -> serde_json::Value {
     let trimmed = input.trim();
 
     // 引号包起来 = 文本宏:`"/review\n"` 输入 /review 再回车。

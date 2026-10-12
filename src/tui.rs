@@ -109,80 +109,162 @@ impl Action {
     }
 }
 
-fn device_actions(kind: crate::ble::DeviceKind) -> Vec<Action> {
+fn device_actions(kind: crate::ble::DeviceKind, demo: bool, mock: Mock) -> Vec<Action> {
     use crate::ble::DeviceKind;
     let keys = kind == DeviceKind::VibeKeys;
-    let mut v = vec![
-        Action::imm("wifi: show list", move |_| {
-            config_cmd::wifi(kind, WifiAction::Show, false)
-        }),
-        Action::ask(
-            "wifi: add / update",
-            &["SSID:", "password (empty = open):"],
-            move |a| {
-                config_cmd::wifi(
-                    kind,
-                    WifiAction::Add {
-                        ssid: a[0].clone(),
-                        pass: a[1].clone(),
-                    },
-                    false,
-                )
-            },
-        ),
-        Action::ask("wifi: remove", &["SSID:"], move |a| {
-            config_cmd::wifi(kind, WifiAction::Remove { ssid: a[0].clone() }, false)
-        }),
-        Action::ask("server-url", &["MQTT broker URL:"], move |a| {
-            config_cmd::server_url(kind, a[0].clone(), false)
-        }),
-        Action::ask(
-            "asr: set",
-            &[
-                "uri (empty = keep):",
-                "api-key (empty = keep):",
-                "model (empty = keep):",
-            ],
-            move |a| {
-                let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
-                config_cmd::asr(
-                    kind,
-                    config_cmd::AsrOpts {
-                        uri: opt(&a[0]),
-                        api_key: opt(&a[1]),
-                        model: opt(&a[2]),
-                        clean: false,
-                    },
-                    false,
-                )
-            },
-        ),
-        Action::imm("asr: clear", move |_| {
-            config_cmd::asr(
+    let mut v: Vec<Action> = Vec::new();
+    let origin = mock;
+
+    let mock = origin.clone();
+    v.push(Action::imm("wifi: show list", move |_| {
+        if demo {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&mock.borrow()["wifi_list"])?
+            );
+            return Ok(());
+        }
+        config_cmd::wifi(kind, WifiAction::Show, false)
+    }));
+
+    let mock = origin.clone();
+    v.push(Action::ask(
+        "wifi: add / update",
+        &["SSID:", "password (empty = open):"],
+        move |a| {
+            if demo {
+                mock_wifi_add(&mock, &a[0], &a[1]);
+                println!("wifi `{}' saved (demo)", a[0]);
+                return Ok(());
+            }
+            config_cmd::wifi(
                 kind,
-                config_cmd::AsrOpts {
-                    uri: None,
-                    api_key: None,
-                    model: None,
-                    clean: true,
+                WifiAction::Add {
+                    ssid: a[0].clone(),
+                    pass: a[1].clone(),
                 },
                 false,
             )
-        }),
-        Action::imm("reset device", move |_| config_cmd::reset(kind)),
-    ];
+        },
+    ));
+
+    let mock = origin.clone();
+    v.push(Action::ask("wifi: remove", &["SSID:"], move |a| {
+        if demo {
+            mock_wifi_remove(&mock, &a[0]);
+            println!("wifi `{}' removed (demo)", a[0]);
+            return Ok(());
+        }
+        config_cmd::wifi(kind, WifiAction::Remove { ssid: a[0].clone() }, false)
+    }));
+
+    let mock = origin.clone();
+    v.push(Action::ask("server-url", &["MQTT broker URL:"], move |a| {
+        if demo {
+            mock_patch(&mock, "server_url", a[0].clone().into());
+            println!("server_url = {} (demo)", a[0]);
+            return Ok(());
+        }
+        config_cmd::server_url(kind, a[0].clone(), false)
+    }));
+
+    let mock = origin.clone();
+    v.push(Action::ask(
+        "asr: set",
+        &[
+            "uri (empty = keep):",
+            "api-key (empty = keep):",
+            "model (empty = keep):",
+        ],
+        move |a| {
+            if demo {
+                let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+                mock_asr_set(
+                    &mock,
+                    opt(&a[0]).as_deref(),
+                    opt(&a[1]).as_deref(),
+                    opt(&a[2]).as_deref(),
+                );
+                println!("asr_config updated (demo)");
+                return Ok(());
+            }
+            let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+            config_cmd::asr(
+                kind,
+                config_cmd::AsrOpts {
+                    uri: opt(&a[0]),
+                    api_key: opt(&a[1]),
+                    model: opt(&a[2]),
+                    clean: false,
+                },
+                false,
+            )
+        },
+    ));
+
+    let mock = origin.clone();
+    v.push(Action::imm("asr: clear", move |_| {
+        if demo {
+            mock_patch(
+                &mock,
+                "asr_config",
+                serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
+            );
+            println!("asr_config cleared (demo)");
+            return Ok(());
+        }
+        config_cmd::asr(
+            kind,
+            config_cmd::AsrOpts {
+                uri: None,
+                api_key: None,
+                model: None,
+                clean: true,
+            },
+            false,
+        )
+    }));
+
+    v.push(Action::imm("reset device", move |_| {
+        if demo {
+            println!("device rebooting (demo)");
+            return Ok(());
+        }
+        config_cmd::reset(kind)
+    }));
+
     if keys {
+        let mock = origin.clone();
         v.push(Action::ask("mic-model", &["ptt | toggle:"], move |a| {
+            if demo {
+                let val = match a[0].to_lowercase().as_str() {
+                    "ptt" => 0,
+                    "toggle" => 1,
+                    other => anyhow::bail!("invalid mic mode `{other}` — use ptt or toggle"),
+                };
+                mock_patch(&mock, "mic_model", serde_json::json!(val));
+                println!("mic_model = {val} (demo)");
+                return Ok(());
+            }
             config_cmd::mic_model(kind, a[0].clone(), false)
         }));
+
+        let mock = origin.clone();
         v.push(Action::ask("prefer-asr", &["on | off:"], move |a| {
             let on = match a[0].to_lowercase().as_str() {
                 "on" | "true" => true,
                 "off" | "false" => false,
                 other => anyhow::bail!("invalid value `{other}` — use on or off"),
             };
+            if demo {
+                mock_patch(&mock, "prefer_builtin_asr", serde_json::json!(on));
+                println!("prefer_builtin_asr = {on} (demo)");
+                return Ok(());
+            }
             config_cmd::prefer_asr(kind, on, false)
         }));
+
+        let mock = origin.clone();
         v.push(Action::ask(
             "keymap",
             &[
@@ -193,15 +275,103 @@ fn device_actions(kind: crate::ble::DeviceKind) -> Vec<Action> {
                 ),
                 "binding (text: \"/compact\\n\"  combo: Ctrl+C):",
             ],
-            move |a| config_cmd::keymap(kind, a[0].clone(), a[1].clone()),
+            move |a| {
+                if demo {
+                    mock_keymap(&mock, &a[0], &a[1]);
+                    println!("keymap {} updated (demo)", a[0]);
+                    return Ok(());
+                }
+                config_cmd::keymap(kind, a[0].clone(), a[1].clone())
+            },
         ));
     }
+
+    let mock = origin.clone();
     v.push(Action::ask(
         "tailscale: bind",
         &["tailscale auth key:"],
-        move |a| config_cmd::tailscale(kind, a[0].clone()),
+        move |a| {
+            if demo {
+                mock_patch(&mock, "tailscale_key", a[0].clone().into());
+                println!("tailscale key bound (demo)");
+                return Ok(());
+            }
+            config_cmd::tailscale(kind, a[0].clone())
+        },
     ));
+
     v
+}
+
+/// demo 用的假设备状态(内存配置,动作直接改它)。
+type Mock = std::rc::Rc<std::cell::RefCell<serde_json::Value>>;
+
+fn sample_config(kind: crate::ble::DeviceKind) -> serde_json::Value {
+    use crate::ble::DeviceKind;
+    let base = serde_json::json!({
+        "wifi_list": [
+            {"ssid": "Home", "pass": "horse-battery"},
+            {"ssid": "Office", "pass": "correct-horse"}
+        ],
+        "server_url": "mqtt://127.0.0.1:1883",
+        "asr_config": {
+            "platform": "whisper",
+            "uri": "https://api.openai.com/v1/audio/transcriptions",
+            "api_key": "sk-demo",
+            "model": "whisper-1"
+        },
+    });
+    if kind == DeviceKind::VibeKeys {
+        let mut v = base;
+        v["mic_model"] = serde_json::json!(1);
+        v["prefer_builtin_asr"] = serde_json::json!(true);
+        v
+    } else {
+        base
+    }
+}
+
+// ===== demo 动作:把对应操作直接落在假配置上 =====
+
+fn mock_patch(mock: &Mock, field: &str, v: serde_json::Value) {
+    mock.borrow_mut()[field] = v;
+}
+
+fn mock_wifi_add(mock: &Mock, ssid: &str, pass: &str) {
+    let mut m = mock.borrow_mut();
+    let list = m["wifi_list"].as_array_mut().unwrap();
+    match list.iter_mut().find(|e| e["ssid"] == ssid) {
+        Some(e) => e["pass"] = pass.into(),
+        None => list.push(serde_json::json!({"ssid": ssid, "pass": pass})),
+    }
+}
+
+fn mock_wifi_remove(mock: &Mock, ssid: &str) {
+    mock.borrow_mut()["wifi_list"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| e["ssid"] != ssid);
+}
+
+fn mock_asr_set(mock: &Mock, uri: Option<&str>, api_key: Option<&str>, model: Option<&str>) {
+    let mut m = mock.borrow_mut();
+    let asr = m.get_mut("asr_config").unwrap();
+    if let Some(v) = uri {
+        asr["uri"] = v.into();
+    }
+    if let Some(v) = api_key {
+        asr["api_key"] = v.into();
+    }
+    if let Some(v) = model {
+        asr["model"] = v.into();
+    }
+}
+
+fn mock_keymap(mock: &Mock, key: &str, binding: &str) {
+    let mut m = mock.borrow_mut();
+    let physical = config_cmd::physical_key_name(key);
+    let parsed = config_cmd::parse_key_binding(binding);
+    m["keymap"][&physical] = parsed;
 }
 
 struct DeviceTab {
@@ -211,20 +381,31 @@ struct DeviceTab {
     sel: usize,
     /// 按钮网格的列数,渲染时算出、按键导航用(Cell 是因为 ui() 只拿得到 &Self)。
     grid_cols: std::cell::Cell<usize>,
+    /// demo 模式:不碰 BLE,动作改内存里的假配置。
+    demo: bool,
+    mock: Mock,
 }
 
 impl DeviceTab {
-    fn new(kind: crate::ble::DeviceKind) -> Self {
+    fn new(kind: crate::ble::DeviceKind, demo: bool) -> Self {
+        let mock = std::rc::Rc::new(std::cell::RefCell::new(sample_config(kind)));
+        let actions = device_actions(kind, demo, mock.clone());
         Self {
             kind,
             config: None,
-            actions: device_actions(kind),
+            actions,
             sel: 0,
             grid_cols: std::cell::Cell::new(1),
+            demo,
+            mock,
         }
     }
 
     fn load_config(&mut self, terminal: &mut DefaultTerminal) {
+        if self.demo {
+            self.config = Some(self.mock.borrow().clone());
+            return;
+        }
         let kind = self.kind;
         let res = suspend(terminal, || {
             crate::ble::with_device(kind, |p| async move { crate::ble::read_config(&p).await })
@@ -343,13 +524,13 @@ impl Tab {
     }
 }
 
-pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
+pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
     let dir = pkg::install_dir(dir.as_deref());
     let mut pkg_entries: Vec<Entry> = PKGS.iter().map(Entry::new).collect();
     let mut pkg_sel = 0usize;
     let mut allow_pre = false;
-    let mut keys_tab = DeviceTab::new(crate::ble::DeviceKind::VibeKeys);
-    let mut watch_tab = DeviceTab::new(crate::ble::DeviceKind::Watch);
+    let mut keys_tab = DeviceTab::new(crate::ble::DeviceKind::VibeKeys, demo);
+    let mut watch_tab = DeviceTab::new(crate::ble::DeviceKind::Watch, demo);
     // 默认停在「管理」:不碰蓝牙,启动零延迟;设备页进了才连。
     let mut tab = Tab::Pkgs;
     let mut input: Option<InputState> = None;
@@ -375,6 +556,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
                     allow_pre,
                     input: input.as_ref(),
                     message: &message,
+                    demo,
                 },
             )
         })?;
@@ -434,6 +616,18 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
             KeyCode::Tab => {
                 tab = tab.next();
                 message = default_message(tab);
+                // demo 不碰蓝牙,进设备页直接把假配置摆出来。
+                if demo {
+                    match tab {
+                        Tab::Keys if keys_tab.config.is_none() => {
+                            keys_tab.load_config(&mut terminal)
+                        }
+                        Tab::Watch if watch_tab.config.is_none() => {
+                            watch_tab.load_config(&mut terminal)
+                        }
+                        _ => {}
+                    }
+                }
             }
             KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') => {
                 let i = match key.code {
@@ -443,6 +637,17 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
                 };
                 tab = Tab::all()[i];
                 message = default_message(tab);
+                if demo {
+                    match tab {
+                        Tab::Keys if keys_tab.config.is_none() => {
+                            keys_tab.load_config(&mut terminal)
+                        }
+                        Tab::Watch if watch_tab.config.is_none() => {
+                            watch_tab.load_config(&mut terminal)
+                        }
+                        _ => {}
+                    }
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => match tab {
                 // 按钮网格里 = 向下移动一行;包列表 = 下一行。
@@ -511,6 +716,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
                                 allow_pre,
                                 input: input.as_ref(),
                                 message: &message,
+                                demo,
                             },
                         )
                     })?;
@@ -652,6 +858,7 @@ struct UiRefs<'a> {
     allow_pre: bool,
     input: Option<&'a InputState>,
     message: &'a str,
+    demo: bool,
 }
 
 fn ui(f: &mut Frame, r: UiRefs) {
@@ -664,6 +871,7 @@ fn ui(f: &mut Frame, r: UiRefs) {
         allow_pre,
         input,
         message,
+        demo,
     } = r;
     let [tabs, area, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -706,9 +914,10 @@ fn ui(f: &mut Frame, r: UiRefs) {
     }
 
     let title = format!(
-        " vibeup {} · prerelease: {} ",
+        " vibeup {} · prerelease: {}{} ",
         env!("CARGO_PKG_VERSION"),
-        on_off(allow_pre)
+        on_off(allow_pre),
+        if demo { " · DEMO" } else { "" }
     );
     let mut lines = vec![
         Line::from(title),
@@ -845,4 +1054,64 @@ fn render_packages_tab(f: &mut Frame, area: Rect, entries: &[Entry], sel: usize,
     };
     let table = Table::new(rows, widths).header(header);
     f.render_widget(table, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ble::DeviceKind;
+
+    fn mock() -> Mock {
+        std::rc::Rc::new(std::cell::RefCell::new(sample_config(DeviceKind::VibeKeys)))
+    }
+
+    #[test]
+    fn sample_config_has_device_specific_fields() {
+        let keys = sample_config(DeviceKind::VibeKeys);
+        assert!(keys.get("mic_model").is_some());
+        assert!(keys.get("prefer_builtin_asr").is_some());
+        let watch = sample_config(DeviceKind::Watch);
+        assert!(watch.get("mic_model").is_none());
+    }
+
+    #[test]
+    fn mock_wifi_add_upserts() {
+        let m = mock();
+        mock_wifi_add(&m, "Cafe", "pw");
+        assert_eq!(m.borrow()["wifi_list"].as_array().unwrap().len(), 3);
+        mock_wifi_add(&m, "Cafe", "pw2");
+        let list = m.borrow()["wifi_list"].clone();
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[2]["pass"], "pw2");
+    }
+
+    #[test]
+    fn mock_wifi_remove_filters() {
+        let m = mock();
+        mock_wifi_remove(&m, "Home");
+        let list = m.borrow()["wifi_list"].clone();
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["ssid"], "Office");
+    }
+
+    #[test]
+    fn mock_asr_set_keeps_unset_fields() {
+        let m = mock();
+        mock_asr_set(&m, Some("https://x"), None, Some("m2"));
+        let asr = &m.borrow()["asr_config"];
+        assert_eq!(asr["uri"], "https://x");
+        assert_eq!(asr["api_key"], "sk-demo");
+        assert_eq!(asr["model"], "m2");
+    }
+
+    #[test]
+    fn mock_keymap_uses_physical_key_and_binding_parser() {
+        let m = mock();
+        mock_keymap(&m, "yolo", "\"/review\\n\"");
+        let km = &m.borrow()["keymap"];
+        assert_eq!(km["SWITCH"]["type"], "text");
+        assert_eq!(km["SWITCH"]["value"], "/review\n");
+    }
 }
