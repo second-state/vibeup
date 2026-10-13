@@ -15,5 +15,11 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 uuid = "1"
+
+# musl 静态构建:libdbus(btleplug → bluez 的 BLE 后端)没有 musl 预编译包,
+# 用 vendored feature 从源码编译,免装系统 libdbus。glibc 构建不受影响。
+# (与 vibekeys_app 的 musl 配置一致)
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+dbus = { version = "0.9", features = ["vendored"] }

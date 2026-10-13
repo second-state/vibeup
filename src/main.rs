@@ -169,7 +169,10 @@ fn main() -> Result<()> {
 
 fn run_config(cmd: ConfigCmd) -> Result<()> {
     use config_cmd::{AsrOpts, WifiAction};
-    let parse_device = |s: &str| -> Result<ble::DeviceKind> { ble::DeviceKind::parse(s) };
+    // CLI 直连:不指定具体设备,连该类型扫到的第一台。
+    let parse_device = |s: &str| -> Result<ble::Target> {
+        Ok(ble::Target::auto(ble::DeviceKind::parse(s)?))
+    };
     match cmd {
         ConfigCmd::Show { device } => config_cmd::show(parse_device(&device)?),
         ConfigCmd::Wifi { device, cmd } => {

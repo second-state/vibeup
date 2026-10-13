@@ -1,15 +1,18 @@
 //! `vibeup tui` —— 三个标签:**键盘** / **手表**(BLE 设备配置)+ **管理**
 //! (vibetty / vibekeys 的安装更新)。
 //!
-//! Tab 或 1/2/3 切标签。设备页按功能分节(server / wifi / asr / …),每节只有一条
-//! 上边框带节名;每行是「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框,
-//! 复杂输入(加 WiFi)弹居中的 pop 框分字段填写,立即执行的项直接跑。
+//! Tab 或 1/2/3 切标签。设备页是连接流程:进入 tab 自动后台扫描(界面转圈不
+//! 冻结),扫到后列出候选设备让用户挑,选中连接成功才进入配置界面(见 `Conn`)。
+//! 配置界面按功能分节(server / wifi / asr / …),每节只有一条上边框带节名;每行
+//! 是「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框,复杂输入(加 WiFi)
+//! 弹居中的 pop 框分字段填写,立即执行的项直接跑。
 //! wifi 节是动态列表:现有网络每条一行(回车改密码,`d` 删除),末尾固定一行
-//! `add +` 弹框新增。BLE 和安装动作都是同步阻塞的,执行时先退出 TUI 模式让输出
-//! 打到正常屏幕,结束后再回来(见 `suspend`);设备配置复用 `config_cmd`,demo
-//! 模式改内存假数据。
+//! `add +` 弹框新增。连接成功后持有常驻 BLE 会话(`ble::Session`,后台线程),
+//! 设备动作瞬时完成、断连自动弹窗(vibekeys_app 式检测);扫描/安装这类要打
+//! stdout 或耗时的动作先退出 TUI 模式,结束后再回来(见 `suspend`)。demo
+//! 模式用内存假数据和假设备名走完同样的流程,不碰蓝牙。
 
-use crate::config_cmd::{self, WifiAction};
+use crate::config_cmd;
 use crate::install;
 use crate::pkg::{self, PKGS, Pkg};
 use anyhow::{Result, bail};
@@ -20,7 +23,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::PathBuf;
-use std::rc::Rc;
 
 // ===== 管理标签(包)=====
 
@@ -81,9 +83,6 @@ fn fetch(entries: &mut [Entry], dir: &std::path::Path) {
 
 // ===== 设备标签 =====
 
-/// demo 用的假设备状态(内存配置,动作直接改它)。
-type Mock = Rc<std::cell::RefCell<serde_json::Value>>;
-
 fn sample_config(kind: crate::ble::DeviceKind) -> serde_json::Value {
     use crate::ble::DeviceKind;
     let base = serde_json::json!({
@@ -111,29 +110,23 @@ fn sample_config(kind: crate::ble::DeviceKind) -> serde_json::Value {
 
 // ===== demo 动作:把对应操作直接落在假配置上 =====
 
-fn mock_patch(mock: &Mock, field: &str, v: serde_json::Value) {
-    mock.borrow_mut()[field] = v;
-}
-
-fn mock_wifi_add(mock: &Mock, ssid: &str, pass: &str) {
-    let mut m = mock.borrow_mut();
-    let list = m["wifi_list"].as_array_mut().unwrap();
+fn mock_wifi_add(mock: &mut serde_json::Value, ssid: &str, pass: &str) {
+    let list = mock["wifi_list"].as_array_mut().unwrap();
     match list.iter_mut().find(|e| e["ssid"] == ssid) {
         Some(e) => e["pass"] = pass.into(),
         None => list.push(serde_json::json!({"ssid": ssid, "pass": pass})),
     }
 }
 
-fn mock_wifi_remove(mock: &Mock, ssid: &str) {
-    mock.borrow_mut()["wifi_list"]
+fn mock_wifi_remove(mock: &mut serde_json::Value, ssid: &str) {
+    mock["wifi_list"]
         .as_array_mut()
         .unwrap()
         .retain(|e| e["ssid"] != ssid);
 }
 
-fn mock_asr_set(mock: &Mock, uri: Option<&str>, api_key: Option<&str>, model: Option<&str>) {
-    let mut m = mock.borrow_mut();
-    let asr = m.get_mut("asr_config").unwrap();
+fn mock_asr_set(mock: &mut serde_json::Value, uri: Option<&str>, api_key: Option<&str>, model: Option<&str>) {
+    let asr = mock.get_mut("asr_config").unwrap();
     if let Some(v) = uri {
         asr["uri"] = v.into();
     }
@@ -145,11 +138,91 @@ fn mock_asr_set(mock: &Mock, uri: Option<&str>, api_key: Option<&str>, model: Op
     }
 }
 
-fn mock_keymap(mock: &Mock, key: &str, binding: &str) {
-    let mut m = mock.borrow_mut();
+fn mock_keymap(mock: &mut serde_json::Value, key: &str, binding: &str) {
     let physical = config_cmd::physical_key_name(key);
     let parsed = config_cmd::parse_key_binding(binding);
-    m["keymap"][&physical] = parsed;
+    mock["keymap"][&physical] = parsed;
+}
+
+// ===== 连接流程:进入 tab → 后台扫描 → 列表选设备 → 连接 → 配置界面 =====
+
+/// 设备页连接状态。
+#[derive(Clone, PartialEq, Debug)]
+enum Conn {
+    /// 还没进入过(进入 tab 时弹入口菜单)。
+    Fresh,
+    /// 入口菜单:1 扫描设备 / 2 从网页配置。
+    Menu,
+    /// 网页配置:显示 setup 页地址(`opened` = 浏览器是否已尝试打开)。
+    WebSetup { url: &'static str },
+    /// 后台扫描中。
+    Scanning,
+    /// 扫到候选设备,等用户挑(列表在 `DeviceTab::pick`)。
+    Pick,
+    /// 正在连接(后台),存设备名供提示。
+    Connecting(String),
+    /// 已连上,配置界面就绪。
+    Ready,
+    /// 扫描/连接失败,可重试。
+    Failed(String),
+    /// 连上之后设备断开了(动作/重读报断连类错误):弹窗等回车,回扫描页。
+    Disconnected,
+}
+
+/// 后台 BLE 任务:扫描 2 秒上下、连接也要几秒,放线程里跑,结果经 channel
+/// 回来,TUI 事件循环轮询——界面不冻结,还能画转圈动画。
+struct Job {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<JobOut>,
+}
+
+enum JobOut {
+    Scan(anyhow::Result<Vec<crate::ble::FoundDevice>>),
+    Config(anyhow::Result<serde_json::Value>),
+}
+
+fn spawn_job(f: impl FnOnce() -> JobOut + Send + 'static) -> Job {
+    use std::sync::atomic::AtomicBool;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    Job { done, rx }
+}
+
+/// demo 假设备广播名:仿真机形如 `VibeKeys-XXXX`。
+fn demo_devices(kind: crate::ble::DeviceKind) -> Vec<crate::ble::FoundDevice> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let suffixes = [(nanos & 0xffff) as u16, ((nanos >> 8) & 0xffff) as u16];
+    suffixes
+        .into_iter()
+        .map(|s| crate::ble::FoundDevice {
+            name: format!("{}-{s:04X}", kind.name_prefix()),
+            id: format!("demo-{s:04X}"),
+        })
+        .collect()
+}
+
+/// demo 扫描:假装扫了 0.9s,回两台假设备。
+fn demo_scan_job(kind: crate::ble::DeviceKind) -> Job {
+    spawn_job(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        JobOut::Scan(Ok(demo_devices(kind)))
+    })
+}
+
+/// demo 连接:假装连了 0.4s,回样例配置。
+fn demo_connect_job(kind: crate::ble::DeviceKind) -> Job {
+    spawn_job(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        JobOut::Config(Ok(sample_config(kind)))
+    })
 }
 
 /// 可编辑字段:决定行内编辑提交时调用哪个动作。
@@ -174,7 +247,7 @@ fn field_hint(field: Field) -> &'static str {
         Field::AsrModel => "whisper-1",
         Field::MicModel => "ptt | toggle",
         Field::PreferAsr => "on | off",
-        Field::Keymap => "KEY=BINDING,如 CUSTOM=\"/compact\\n\"",
+        Field::Keymap => "KEY=BINDING, e.g. CUSTOM=\"/compact\\n\"",
         Field::Tailscale => "tskey-auth-…",
     }
 }
@@ -185,154 +258,6 @@ fn next_in_cycle<'a>(values: &'a [&'a str], current: &str) -> &'a str {
         Some(i) => values[(i + 1) % values.len()],
         None => values[0],
     }
-}
-
-/// 提交一个编辑值:demo 落到假配置,真机走 config_cmd(一次 BLE 会话)。
-fn apply_field(
-    kind: crate::ble::DeviceKind,
-    demo: bool,
-    mock: &Mock,
-    field: Field,
-    val: &str,
-) -> Result<()> {
-    let val = val.trim();
-    match field {
-        Field::ServerUrl => {
-            if demo {
-                mock_patch(mock, "server_url", val.into());
-                return Ok(());
-            }
-            config_cmd::server_url(kind, val.to_string(), false)
-        }
-        Field::AsrUri => {
-            if demo {
-                mock_asr_set(mock, Some(val), None, None);
-                return Ok(());
-            }
-            config_cmd::asr(
-                kind,
-                config_cmd::AsrOpts {
-                    uri: Some(val.to_string()),
-                    ..Default::default()
-                },
-                false,
-            )
-        }
-        Field::AsrApiKey => {
-            if demo {
-                mock_asr_set(mock, None, Some(val), None);
-                return Ok(());
-            }
-            config_cmd::asr(
-                kind,
-                config_cmd::AsrOpts {
-                    api_key: Some(val.to_string()),
-                    ..Default::default()
-                },
-                false,
-            )
-        }
-        Field::AsrModel => {
-            if demo {
-                mock_asr_set(mock, None, None, Some(val));
-                return Ok(());
-            }
-            config_cmd::asr(
-                kind,
-                config_cmd::AsrOpts {
-                    model: Some(val.to_string()),
-                    ..Default::default()
-                },
-                false,
-            )
-        }
-        Field::MicModel => {
-            if demo {
-                let v = match val.to_lowercase().as_str() {
-                    "ptt" => 0,
-                    "toggle" => 1,
-                    other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
-                };
-                mock_patch(mock, "mic_model", serde_json::json!(v));
-                return Ok(());
-            }
-            config_cmd::mic_model(kind, val.to_string(), false)
-        }
-        Field::PreferAsr => {
-            let on = match val.to_lowercase().as_str() {
-                "on" | "true" => true,
-                "off" | "false" => false,
-                other => bail!("invalid value `{other}` — use on or off"),
-            };
-            if demo {
-                mock_patch(mock, "prefer_builtin_asr", serde_json::json!(on));
-                return Ok(());
-            }
-            config_cmd::prefer_asr(kind, on, false)
-        }
-        Field::Keymap => {
-            let Some((key, binding)) = val.split_once('=') else {
-                bail!("需要 `KEY=BINDING`,如 CUSTOM=\"/compact\\n\"");
-            };
-            if demo {
-                mock_keymap(mock, key.trim(), binding.trim());
-                return Ok(());
-            }
-            config_cmd::keymap(kind, key.trim().to_string(), binding.trim().to_string())
-        }
-        Field::Tailscale => {
-            if demo {
-                mock_patch(mock, "tailscale_key", val.into());
-                return Ok(());
-            }
-            config_cmd::tailscale(kind, val.to_string())
-        }
-    }
-}
-
-/// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机走一次 BLE。
-fn apply_wifi_add(
-    kind: crate::ble::DeviceKind,
-    demo: bool,
-    mock: &Mock,
-    ssid: &str,
-    pass: &str,
-) -> Result<()> {
-    if ssid.trim().is_empty() {
-        bail!("ssid 不能为空");
-    }
-    if demo {
-        mock_wifi_add(mock, ssid.trim(), pass);
-        return Ok(());
-    }
-    config_cmd::wifi(
-        kind,
-        WifiAction::Add {
-            ssid: ssid.trim().to_string(),
-            pass: pass.to_string(),
-        },
-        false,
-    )
-}
-
-/// WiFi 删除。
-fn apply_wifi_remove(
-    kind: crate::ble::DeviceKind,
-    demo: bool,
-    mock: &Mock,
-    ssid: &str,
-) -> Result<()> {
-    if demo {
-        mock_wifi_remove(mock, ssid);
-        return Ok(());
-    }
-    config_cmd::wifi(
-        kind,
-        WifiAction::Remove {
-            ssid: ssid.to_string(),
-        },
-        false,
-    )
 }
 
 /// 从 CONFIG 快照取一个字段的展示值(走点路径,缺失 = "")。
@@ -354,9 +279,6 @@ fn cfg_get(v: &serde_json::Value, path: &[&str]) -> String {
 fn asr_cfg(v: &serde_json::Value, key: &str) -> String {
     cfg_get(v, &["asr_config", key])
 }
-
-/// pop 框的字段提交动作。
-type Submit = Rc<dyn Fn(&[String]) -> Result<()>>;
 
 /// 带光标的单行输入:支持左右/Home/End 移动、任意位置插入、前后删除。
 #[derive(Default)]
@@ -461,16 +383,32 @@ impl Input {
     }
 }
 
-/// pop 框定义:标题 + 字段(带初始值)+ 提交动作。
-struct PopupSpec {
-    title: &'static str,
-    fields: Vec<(&'static str, String)>,
-    submit: Submit,
+/// pop 框种类。提交动作不用闭包:动作就两个(wifi 增/改),主循环按 kind
+/// 直接分发,行数据保持纯数据。
+#[derive(Clone)]
+enum PopupKind {
+    /// 新增 WiFi:ssid + pass 两个字段。
+    WifiAdd,
+    /// 改某条 WiFi 的密码。
+    WifiPass { ssid: String },
 }
 
+impl PopupKind {
+    /// (标题, 字段名列表)。
+    fn spec(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::WifiAdd => (" add wifi ", &["ssid", "pass"]),
+            Self::WifiPass { .. } => (" wifi: change password ", &["pass"]),
+        }
+    }
+}
+
+#[derive(Clone)]
 enum RowAction {
-    /// 立即执行(wifi show list / asr clear / reset)。
-    Run(Rc<dyn Fn() -> Result<()>>),
+    /// 清空 ASR 配置。
+    AsrClear,
+    /// 设备重启使已存配置生效。
+    ResetDevice,
     /// 行内单行编辑(选中回车,该行变编辑框)。
     Edit(Field),
     /// 枚举选项:回车直接切到下一个值,不进编辑框。
@@ -479,7 +417,7 @@ enum RowAction {
         values: Vec<&'static str>,
     },
     /// 回车弹 pop 框分字段填写。
-    Popup(PopupSpec),
+    Popup(PopupKind),
     /// 一条现有 WiFi:回车弹框改密码,`d` 删除。
     WifiEntry { ssid: String },
 }
@@ -505,39 +443,63 @@ impl DevRow {
 
 struct DeviceTab {
     kind: crate::ble::DeviceKind,
+    /// 连接流程状态:进 tab 扫描 → 选设备 → 连接 → Ready 后才是配置界面。
+    conn: Conn,
+    /// 扫描出的候选设备(Pick 状态下的选择列表)。
+    pick: Vec<crate::ble::FoundDevice>,
+    pick_sel: usize,
+    /// 入口菜单的选中项(0 = 扫描设备,1 = 从网页配置)。
+    menu_sel: usize,
     config: Option<serde_json::Value>,
+    /// 选中的设备(Ready 后所有动作和重读都发给它,顶部显示名字)。
+    connected: Option<Connected>,
+    /// 正在连接的设备,连接成功后转正为 `connected`。
+    pending: Option<Connected>,
     rows: Vec<DevRow>,
     sel: usize,
-    /// demo 模式:不碰 BLE,动作改内存里的假配置。
+    /// demo 模式:不碰 BLE,动作改内存里的假配置,扫描/连接用假设备走流程。
     demo: bool,
-    mock: Mock,
+    mock: serde_json::Value,
     /// 行内编辑:选中行下标 + 当前输入。
     editing: Option<(usize, Input)>,
     /// 打开的 pop 框。
     popup: Option<PopupState>,
+    /// 进行中的后台扫描/连接。
+    job: Option<Job>,
+    /// 常驻 BLE 会话(真机 Ready 后持有,动作走它,断连事件从它来)。
+    session: Option<crate::ble::Session>,
+    /// 转圈动画帧计数(事件循环空转时递增)。
+    spin: usize,
 }
 
-/// 运行中的 pop 框:字段初始值展开成带光标的输入。
+/// 已连上/正在连的设备:名字给界面顶部显示,连接本体在 `session` 里。
+struct Connected {
+    name: String,
+}
+
+/// 运行中的 pop 框:字段展开成带光标的输入,提交按 kind 分发。
 struct PopupState {
+    kind: PopupKind,
     title: String,
     labels: Vec<&'static str>,
     inputs: Vec<Input>,
     cur: usize,
-    submit: Submit,
 }
 
 impl PopupState {
-    fn new(spec: &PopupSpec) -> Self {
+    /// `initials` 按字段顺序给初始值(改密码预填旧密码;新增 WiFi 全空)。
+    fn new(kind: PopupKind, initials: Vec<String>) -> Self {
+        let (title, labels) = kind.spec();
         Self {
-            title: spec.title.to_string(),
-            labels: spec.fields.iter().map(|(l, _)| *l).collect(),
-            inputs: spec
-                .fields
+            kind,
+            title: title.into(),
+            labels: labels.to_vec(),
+            inputs: labels
                 .iter()
-                .map(|(_, v)| Input::with_str(v))
+                .enumerate()
+                .map(|(i, _)| Input::with_str(initials.get(i).map(String::as_str).unwrap_or("")))
                 .collect(),
             cur: 0,
-            submit: spec.submit.clone(),
         }
     }
 
@@ -564,28 +526,347 @@ impl PopupState {
 
 impl DeviceTab {
     fn new(kind: crate::ble::DeviceKind, demo: bool) -> Self {
-        let mock = Rc::new(std::cell::RefCell::new(sample_config(kind)));
         let mut t = Self {
             kind,
+            conn: Conn::Fresh,
+            pick: Vec::new(),
+            pick_sel: 0,
+            menu_sel: 0,
             config: None,
+            connected: None,
+            pending: None,
             rows: Vec::new(),
             sel: 0,
             demo,
-            mock,
+            mock: sample_config(kind),
             editing: None,
             popup: None,
+            job: None,
+            session: None,
+            spin: 0,
         };
         t.rebuild_rows();
         t
     }
 
+    /// 常驻会话(真机动作走它)。
+    fn session(&self) -> Result<&crate::ble::Session> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("device session is closed"))
+    }
+
+    /// 提交一个编辑值:demo 落假配置,真机走常驻会话(瞬时,不重扫重连)。
+    fn do_field(&mut self, field: Field, val: &str) -> Result<()> {
+        let val = val.trim();
+        match field {
+            Field::ServerUrl => {
+                if self.demo {
+                    self.mock["server_url"] = val.into();
+                    return Ok(());
+                }
+                self.session()?.write_config_field("server_url", val.into())
+            }
+            Field::AsrUri => {
+                if self.demo {
+                    mock_asr_set(&mut self.mock, Some(val), None, None);
+                    return Ok(());
+                }
+                // 与 CLI `asr --uri` 同款:只带 uri,其余置 null(固件忽略)。
+                self.session()?.write_config_field(
+                    "asr_config",
+                    serde_json::json!({
+                        "platform": "whisper",
+                        "uri": val,
+                        "api_key": serde_json::Value::Null,
+                        "model": serde_json::Value::Null,
+                    }),
+                )
+            }
+            Field::AsrApiKey => {
+                if self.demo {
+                    mock_asr_set(&mut self.mock, None, Some(val), None);
+                    return Ok(());
+                }
+                self.session()?.write_config_field(
+                    "asr_config",
+                    serde_json::json!({
+                        "platform": "whisper",
+                        "uri": serde_json::Value::Null,
+                        "api_key": val,
+                        "model": serde_json::Value::Null,
+                    }),
+                )
+            }
+            Field::AsrModel => {
+                if self.demo {
+                    mock_asr_set(&mut self.mock, None, None, Some(val));
+                    return Ok(());
+                }
+                self.session()?.write_config_field(
+                    "asr_config",
+                    serde_json::json!({
+                        "platform": "whisper",
+                        "uri": serde_json::Value::Null,
+                        "api_key": serde_json::Value::Null,
+                        "model": val,
+                    }),
+                )
+            }
+            Field::MicModel => {
+                if self.demo {
+                    let v = match val.to_lowercase().as_str() {
+                        "ptt" => 0,
+                        "toggle" => 1,
+                        other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
+                    };
+                    self.mock["mic_model"] = serde_json::json!(v);
+                    return Ok(());
+                }
+                let v = match val.to_lowercase().as_str() {
+                    "ptt" => 0,
+                    "toggle" => 1,
+                    other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
+                };
+                self.session()?
+                    .write_config_field("mic_model", serde_json::json!(v))
+            }
+            Field::PreferAsr => {
+                let on = match val.to_lowercase().as_str() {
+                    "on" | "true" => true,
+                    "off" | "false" => false,
+                    other => bail!("invalid value `{other}` — use on or off"),
+                };
+                if self.demo {
+                    self.mock["prefer_builtin_asr"] = serde_json::json!(on);
+                    return Ok(());
+                }
+                self.session()?
+                    .write_config_field("prefer_builtin_asr", serde_json::json!(on))
+            }
+            Field::Keymap => {
+                let Some((key, binding)) = val.split_once('=') else {
+                    bail!("expected `KEY=BINDING`, e.g. CUSTOM=\"/compact\\n\"");
+                };
+                if self.demo {
+                    mock_keymap(&mut self.mock, key.trim(), binding.trim());
+                    return Ok(());
+                }
+                let payload = config_cmd::build_keymap_config(key.trim(), binding.trim());
+                self.session()?.write_keymap(&payload)
+            }
+            Field::Tailscale => {
+                if self.demo {
+                    self.mock["tailscale_key"] = val.into();
+                    return Ok(());
+                }
+                if val.is_empty() {
+                    bail!("empty tailscale auth key");
+                }
+                // 手表上这条写是独占的:固件存完立刻跳 Tailscale 页、断连 ——
+                // 断连会以 Disconnected 事件到达,弹窗是预期表现。
+                self.session()?
+                    .write_config_field("tailscale_key", serde_json::Value::String(val.into()))
+            }
+        }
+    }
+
+    /// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机读-改-写整个列表
+    /// (和 CLI `wifi add` 一致,顺序 = 优先级)。
+    fn do_wifi_add(&mut self, ssid: &str, pass: &str) -> Result<()> {
+        if ssid.trim().is_empty() {
+            bail!("ssid must not be empty");
+        }
+        if self.demo {
+            mock_wifi_add(&mut self.mock, ssid.trim(), pass);
+            return Ok(());
+        }
+        let session = self.session()?;
+        let list = crate::ble::parse_wifi_list(&serde_json::to_string(&session.read_config()?)?);
+        let mut list = list;
+        match list.iter_mut().find(|(s, _)| *s == ssid.trim()) {
+            Some(e) => e.1 = pass.to_string(),
+            None => list.push((ssid.trim().to_string(), pass.to_string())),
+        }
+        if list.len() > crate::ble::MAX_WIFI_CREDS {
+            bail!(
+                "wifi list is full ({}/{}): remove one first",
+                list.len(),
+                crate::ble::MAX_WIFI_CREDS
+            );
+        }
+        session.write_config_field("wifi_list", crate::ble::wifi_list_to_json(&list))
+    }
+
+    /// WiFi 删除。
+    fn do_wifi_remove(&mut self, ssid: &str) -> Result<()> {
+        if self.demo {
+            mock_wifi_remove(&mut self.mock, ssid);
+            return Ok(());
+        }
+        let session = self.session()?;
+        let list = crate::ble::parse_wifi_list(&serde_json::to_string(&session.read_config()?)?);
+        let rest: Vec<_> = list.iter().filter(|(s, _)| *s != ssid).cloned().collect();
+        if rest.len() == list.len() {
+            bail!("wifi `{ssid}' not in the list");
+        }
+        session.write_config_field("wifi_list", crate::ble::wifi_list_to_json(&rest))
+    }
+
+    /// 清空 ASR 配置(与 vibekeys_app `asr-config --clean` 一致:全空串)。
+    fn do_asr_clear(&mut self) -> Result<()> {
+        if self.demo {
+            self.mock["asr_config"] =
+                serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""});
+            return Ok(());
+        }
+        self.session()?.write_config_field(
+            "asr_config",
+            serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
+        )
+    }
+
+    /// 设备重启使已存配置生效。重启会掐断连接,断连事件随后到 → 弹窗,
+    /// 回车重扫即可重连。
+    fn do_reset(&mut self) -> Result<()> {
+        if self.demo {
+            return Ok(());
+        }
+        self.session()?.reset()
+    }
+
+    /// 进入设备页:先弹入口菜单(扫描设备 / 从网页配置),不自动扫描。
+    fn enter(&mut self) {
+        if self.conn == Conn::Fresh {
+            self.conn = Conn::Menu;
+        }
+    }
+
+    /// 网页配置:切到地址弹窗,URL 由用户自己复制去浏览器打开。
+    fn show_web_setup(&mut self) {
+        let url = self.kind.setup_url();
+        self.conn = Conn::WebSetup { url };
+    }
+
+    fn start_scan(&mut self) {
+        // 旧任务直接弃:线程跑完自然退出,结果没人收而已。
+        self.job = None;
+        self.conn = Conn::Scanning;
+        let kind = self.kind;
+        self.job = Some(match self.demo {
+            true => demo_scan_job(kind),
+            false => spawn_job(move || JobOut::Scan(crate::ble::scan_devices(kind))),
+        });
+    }
+
+    fn start_connect(&mut self, dev: crate::ble::FoundDevice) {
+        self.job = None;
+        self.session = None;
+        self.pending = Some(Connected {
+            name: dev.name.clone(),
+        });
+        self.conn = Conn::Connecting(dev.name);
+        let kind = self.kind;
+        match self.demo {
+            // demo:假任务 0.4s 后回样例配置。
+            true => self.job = Some(demo_connect_job(kind)),
+            // 真机:起常驻会话,连接结果(Ready/Disconnected)从事件来。
+            false => {
+                let target = crate::ble::Target::picked(self.kind, dev.id.clone());
+                self.session = Some(crate::ble::Session::open(target));
+            }
+        }
+    }
+
+    /// 轮询后台任务;完成则推进状态机,返回给 footer 的消息。
+    fn poll_job(&mut self) -> Option<String> {
+        let job = self.job.take()?;
+        if !job.done.load(std::sync::atomic::Ordering::Relaxed) {
+            self.job = Some(job);
+            return None;
+        }
+        match job.rx.try_recv().ok() {
+            Some(JobOut::Scan(res)) => Some(self.on_scan_result(res)),
+            Some(JobOut::Config(res)) => Some(self.on_connect_result(res)),
+            // done 置位却没有结果:线程 panic 了,极少见,按失败走。
+            None => {
+                self.conn = Conn::Failed("background task died".into());
+                Some("background task died".into())
+            }
+        }
+    }
+
+    fn on_scan_result(&mut self, res: anyhow::Result<Vec<crate::ble::FoundDevice>>) -> String {
+        match res {
+            Ok(devs) if !devs.is_empty() => {
+                self.pick = devs;
+                self.pick_sel = 0;
+                self.conn = Conn::Pick;
+                format!("found {} device(s) — pick one", self.pick.len())
+            }
+            Ok(_) => {
+                self.conn = Conn::Failed("no devices found".into());
+                "no devices found".into()
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.conn = Conn::Failed(msg.clone());
+                msg
+            }
+        }
+    }
+
+    fn on_connect_result(&mut self, res: anyhow::Result<serde_json::Value>) -> String {
+        match res {
+            Ok(cfg) => {
+                self.config = Some(cfg);
+                self.connected = Some(self.pending.take().unwrap_or_else(|| Connected {
+                    name: self.kind.name().into(),
+                }));
+                self.rebuild_rows();
+                self.sel = self.sel.min(self.rows.len() - 1);
+                self.conn = Conn::Ready;
+                "connected".into()
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.conn = Conn::Failed(msg.clone());
+                msg
+            }
+        }
+    }
+
+    /// 轮询常驻会话事件(连接建立/断连)。断连按所处阶段分流:Ready → 弹窗;
+    /// 还在连接中 → 失败屏。
+    fn poll_session(&mut self) -> Option<String> {
+        let ev = self.session.as_ref()?.try_event()?;
+        Some(self.on_session_event(ev))
+    }
+
+    fn on_session_event(&mut self, ev: crate::ble::SessionEvent) -> String {
+        match ev {
+            crate::ble::SessionEvent::Ready(res) => self.on_connect_result(res),
+            crate::ble::SessionEvent::Disconnected(e) => {
+                self.session = None;
+                if self.conn == Conn::Ready {
+                    self.editing = None;
+                    self.popup = None;
+                    self.conn = Conn::Disconnected;
+                    format!("device disconnected: {e:#}")
+                } else {
+                    // 连接还没建立就断了:走失败屏。
+                    self.on_connect_result(Err(e))
+                }
+            }
+        }
+    }
+
     /// 按当前配置快照重建行(wifi 列表是动态的,其余节的值也一并刷新)。
+    /// 行是纯数据:动作在主循环里按 RowAction 分发到 `do_*` 方法。
     fn rebuild_rows(&mut self) {
         let empty = serde_json::json!({});
         let cfg = self.config.as_ref().unwrap_or(&empty);
-        let kind = self.kind;
-        let demo = self.demo;
-        let keys = kind == crate::ble::DeviceKind::VibeKeys;
+        let keys = self.kind == crate::ble::DeviceKind::VibeKeys;
         let mut rows: Vec<DevRow> = Vec::new();
 
         rows.push(DevRow::edit(
@@ -622,27 +903,11 @@ impl DeviceTab {
                 action: RowAction::WifiEntry { ssid: ssid.clone() },
             });
         }
-        let submit: Submit = {
-            let mock = self.mock.clone();
-            Rc::new(move |vals| {
-                apply_wifi_add(
-                    kind,
-                    demo,
-                    &mock,
-                    vals.first().map(String::as_str).unwrap_or(""),
-                    vals.get(1).map(String::as_str).unwrap_or(""),
-                )
-            })
-        };
         rows.push(DevRow {
             section: "wifi",
             label: "add +".into(),
             value: String::new(),
-            action: RowAction::Popup(PopupSpec {
-                title: " add wifi ",
-                fields: vec![("ssid", String::new()), ("pass", String::new())],
-                submit,
-            }),
+            action: RowAction::Popup(PopupKind::WifiAdd),
         });
 
         rows.push(DevRow::edit(
@@ -663,31 +928,11 @@ impl DeviceTab {
             Field::AsrModel,
             asr_cfg(cfg, "model"),
         ));
-        let mock = self.mock.clone();
         rows.push(DevRow {
             section: "asr",
             label: "clear".into(),
             value: String::new(),
-            action: RowAction::Run(Rc::new(move || {
-                if demo {
-                    mock_patch(
-                        &mock,
-                        "asr_config",
-                        serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
-                    );
-                    return Ok(());
-                }
-                config_cmd::asr(
-                    kind,
-                    config_cmd::AsrOpts {
-                        uri: None,
-                        api_key: None,
-                        model: None,
-                        clean: true,
-                    },
-                    false,
-                )
-            })),
+            action: RowAction::AsrClear,
         });
 
         if keys {
@@ -746,34 +991,30 @@ impl DeviceTab {
             section: "device",
             label: "reset device".into(),
             value: String::new(),
-            action: RowAction::Run(Rc::new(move || {
-                if demo {
-                    return Ok(());
-                }
-                config_cmd::reset(kind)
-            })),
+            action: RowAction::ResetDevice,
         });
 
         self.sel = self.sel.min(rows.len() - 1);
         self.rows = rows;
     }
 
-    fn load_config(&mut self, terminal: &mut DefaultTerminal) {
+    /// 重读配置(r 键、动作成功后)。demo 读内存假数据;真机走常驻会话,
+    /// 瞬时完成。返回错误消息,None = 成功;失败保留旧快照,界面不塌。
+    /// 断连不走这里 —— 会话会推 Disconnected 事件,由 `on_session_event` 弹窗。
+    fn load_config(&mut self) -> Option<String> {
         if self.demo {
-            self.config = Some(self.mock.borrow().clone());
+            self.config = Some(self.mock.clone());
             self.rebuild_rows();
-            return;
+            return None;
         }
-        let kind = self.kind;
-        let res = suspend(terminal, || {
-            crate::ble::with_device(kind, |p| async move { crate::ble::read_config(&p).await })
-        });
-        match res {
+        let session = self.session.as_ref()?;
+        match session.read_config() {
             Ok(cfg) => {
                 self.config = Some(cfg);
                 self.rebuild_rows();
+                None
             }
-            Err(_) => self.config = None,
+            Err(e) => Some(format!("{e:#}")),
         }
     }
 }
@@ -794,9 +1035,9 @@ impl Tab {
 
     fn title(self) -> &'static str {
         match self {
-            Tab::Keys => "键盘",
-            Tab::Watch => "手表",
-            Tab::Pkgs => "管理",
+            Tab::Keys => "Keyboard",
+            Tab::Watch => "Watch",
+            Tab::Pkgs => "Packages",
         }
     }
 
@@ -847,7 +1088,44 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 },
             )
         })?;
-        let Event::Key(key) = event::read()? else {
+        let ev = if keys_tab.job.is_some()
+            || watch_tab.job.is_some()
+            || keys_tab.session.is_some()
+            || watch_tab.session.is_some()
+        {
+            // 后台扫描/连接进行中,或常驻会话活着(要收断连事件):限时等键 +
+            // 轮询;转圈动画靠空转重画推进。
+            if event::poll(std::time::Duration::from_millis(80))? {
+                event::read()?
+            } else {
+                if let Some(m) = keys_tab.poll_job() {
+                    message = m;
+                }
+                if let Some(m) = watch_tab.poll_job() {
+                    message = m;
+                }
+                if let Some(m) = keys_tab.poll_session() {
+                    message = m;
+                }
+                if let Some(m) = watch_tab.poll_session() {
+                    message = m;
+                }
+                if keys_tab.job.is_some()
+                    || matches!(keys_tab.conn, Conn::Connecting(_))
+                {
+                    keys_tab.spin += 1;
+                }
+                if watch_tab.job.is_some()
+                    || matches!(watch_tab.conn, Conn::Connecting(_))
+                {
+                    watch_tab.spin += 1;
+                }
+                continue;
+            }
+        } else {
+            event::read()?
+        };
+        let Event::Key(key) = ev else {
             continue;
         };
         // 支持长按:终端按住会连发 Press(老协议)或 Repeat(kitty 协议),都收。
@@ -896,11 +1174,23 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                         let state = t.popup.take().unwrap();
                         let vals: Vec<String> =
                             state.inputs.iter().map(|i| i.buf.clone()).collect();
-                        let res = run_blocking(&mut terminal, demo, || (state.submit)(&vals));
-                        message = format!("{}: {}", state.title.trim(), describe(&res, dry_run));
-                        if res.is_ok() && !dry_run {
-                            t.load_config(&mut terminal);
-                        }
+                        let title = state.title.trim().to_string();
+                        // 会话动作瞬时完成,不再挂起 TUI。
+                        let res = match state.kind {
+                            PopupKind::WifiAdd => t.do_wifi_add(
+                                vals.first().map(String::as_str).unwrap_or(""),
+                                vals.get(1).map(String::as_str).unwrap_or(""),
+                            ),
+                            PopupKind::WifiPass { ref ssid } => t.do_wifi_add(
+                                ssid,
+                                vals.first().map(String::as_str).unwrap_or(""),
+                            ),
+                        };
+                        message = format!("{title}: {}", describe(&res, dry_run));
+                        if res.is_ok() && !dry_run
+                            && let Some(err) = t.load_config() {
+                                message = format!("read failed: {err}");
+                            }
                     }
                 }
                 KeyCode::Char(c) => popup.inputs[popup.cur].insert(c),
@@ -932,14 +1222,12 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                         _ => unreachable!(),
                     };
                     let label = t.rows[idx].label.clone();
-                    let (mock, kind) = (t.mock.clone(), t.kind);
-                    let res = run_blocking(&mut terminal, demo, || {
-                        apply_field(kind, demo, &mock, field, &val.buf)
-                    });
+                    let res = t.do_field(field, &val.buf);
                     message = format!("{label}: {}", describe(&res, dry_run));
-                    if res.is_ok() && !dry_run {
-                        t.load_config(&mut terminal);
-                    }
+                    if res.is_ok() && !dry_run
+                        && let Some(err) = t.load_config() {
+                            message = format!("read failed: {err}");
+                        }
                 }
                 KeyCode::Backspace => input.backspace(),
                 KeyCode::Delete => input.delete(),
@@ -959,23 +1247,35 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
             continue;
         }
 
+        // ---- 设备连接流程(未就绪)独占按键;q / Ctrl+C 仍可退出 ----
+        let is_quit = key.code == KeyCode::Char('q')
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
+        // q / Ctrl+C 退出、Tab 切标签,连接流程弹窗期间也保持可用。
+        if !is_quit
+            && key.code != KeyCode::Tab
+            && matches!(tab, Tab::Keys | Tab::Watch)
+        {
+            let t = if tab == Tab::Keys {
+                &mut keys_tab
+            } else {
+                &mut watch_tab
+            };
+            if !matches!(t.conn, Conn::Ready) {
+                device_flow_key(t, key.code, &mut message);
+                continue;
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') => break,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Tab => {
                 tab = tab.next();
                 message = default_message(tab);
-                // demo 不碰蓝牙,进设备页直接把假配置摆出来。
-                if demo {
-                    match tab {
-                        Tab::Keys if keys_tab.config.is_none() => {
-                            keys_tab.load_config(&mut terminal)
-                        }
-                        Tab::Watch if watch_tab.config.is_none() => {
-                            watch_tab.load_config(&mut terminal)
-                        }
-                        _ => {}
-                    }
+                match tab {
+                    Tab::Keys => keys_tab.enter(),
+                    Tab::Watch => watch_tab.enter(),
+                    Tab::Pkgs => {}
                 }
             }
             KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') => {
@@ -986,16 +1286,10 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 };
                 tab = Tab::all()[i];
                 message = default_message(tab);
-                if demo {
-                    match tab {
-                        Tab::Keys if keys_tab.config.is_none() => {
-                            keys_tab.load_config(&mut terminal)
-                        }
-                        Tab::Watch if watch_tab.config.is_none() => {
-                            watch_tab.load_config(&mut terminal)
-                        }
-                        _ => {}
-                    }
+                match tab {
+                    Tab::Keys => keys_tab.enter(),
+                    Tab::Watch => watch_tab.enter(),
+                    Tab::Pkgs => {}
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => match tab {
@@ -1013,8 +1307,16 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 message = format!("prerelease: {}", on_off(allow_pre));
             }
             KeyCode::Char('r') => match tab {
-                Tab::Keys => keys_tab.load_config(&mut terminal),
-                Tab::Watch => watch_tab.load_config(&mut terminal),
+                Tab::Keys | Tab::Watch => {
+                    let t = if tab == Tab::Keys {
+                        &mut keys_tab
+                    } else {
+                        &mut watch_tab
+                    };
+                    if let Some(err) = t.load_config() {
+                        message = format!("read failed: {err}");
+                    }
+                }
                 Tab::Pkgs => {
                     message = "refreshing…".into();
                     let editing = None;
@@ -1045,14 +1347,13 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     &mut watch_tab
                 };
                 if let RowAction::WifiEntry { ssid } = &t.rows[t.sel].action {
-                    let (mock, kind, ssid) = (t.mock.clone(), t.kind, ssid.clone());
-                    let res = run_blocking(&mut terminal, demo, || {
-                        apply_wifi_remove(kind, demo, &mock, &ssid)
-                    });
+                    let ssid = ssid.clone();
+                    let res = t.do_wifi_remove(&ssid);
                     message = format!("wifi {ssid}: {}", describe(&res, dry_run));
-                    if res.is_ok() && !dry_run {
-                        t.load_config(&mut terminal);
-                    }
+                    if res.is_ok() && !dry_run
+                        && let Some(err) = t.load_config() {
+                            message = format!("read failed: {err}");
+                        }
                 }
             }
             KeyCode::Enter => match tab {
@@ -1062,18 +1363,26 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     } else {
                         &mut watch_tab
                     };
-                    if t.config.is_none() {
-                        t.load_config(&mut terminal);
-                    }
-                    match &t.rows[t.sel].action {
-                        RowAction::Run(run) => {
-                            let run = run.clone();
+                    // 克隆动作,免得借用 rows 卡住后面的 &mut 方法。
+                    let action = t.rows[t.sel].action.clone();
+                    match action {
+                        RowAction::AsrClear => {
                             let label = t.rows[t.sel].label.clone();
-                            let res = run_blocking(&mut terminal, demo, || run());
+                            let res = t.do_asr_clear();
                             message = format!("{label}: {}", describe(&res, dry_run));
-                            if res.is_ok() && !dry_run {
-                                t.load_config(&mut terminal);
-                            }
+                            if res.is_ok() && !dry_run
+                                && let Some(err) = t.load_config() {
+                                    message = format!("read failed: {err}");
+                                }
+                        }
+                        RowAction::ResetDevice => {
+                            let label = t.rows[t.sel].label.clone();
+                            let res = t.do_reset();
+                            message = format!("{label}: {}", describe(&res, dry_run));
+                            if res.is_ok() && !dry_run
+                                && let Some(err) = t.load_config() {
+                                    message = format!("read failed: {err}");
+                                }
                         }
                         RowAction::Edit(_) => {
                             // 预填当前值:方便只改一部分。
@@ -1083,19 +1392,17 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                         RowAction::Cycle { field, values } => {
                             // 枚举选项:回车直接切到下一个值。
                             let current = t.rows[t.sel].value.trim().to_lowercase();
-                            let next = next_in_cycle(values, &current);
-                            let (mock, kind) = (t.mock.clone(), t.kind);
-                            let (label, next) = (t.rows[t.sel].label.clone(), next.to_string());
-                            let res = run_blocking(&mut terminal, demo, || {
-                                apply_field(kind, demo, &mock, *field, &next)
-                            });
+                            let next = next_in_cycle(&values, &current);
+                            let label = t.rows[t.sel].label.clone();
+                            let res = t.do_field(field, next);
                             message = format!("{label}: {}", describe(&res, dry_run));
-                            if res.is_ok() && !dry_run {
-                                t.load_config(&mut terminal);
-                            }
+                            if res.is_ok() && !dry_run
+                                && let Some(err) = t.load_config() {
+                                    message = format!("read failed: {err}");
+                                }
                         }
-                        RowAction::Popup(spec) => {
-                            t.popup = Some(PopupState::new(spec));
+                        RowAction::Popup(kind) => {
+                            t.popup = Some(PopupState::new(kind, Vec::new()));
                             message = "Tab/↑↓ field · Enter save · Esc cancel".into();
                         }
                         RowAction::WifiEntry { ssid } => {
@@ -1105,31 +1412,17 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                                 .as_ref()
                                 .and_then(|c| c.get("wifi_list").and_then(|v| v.as_array()))
                                 .and_then(|arr| {
-                                    arr.iter().find(|e| {
-                                        e.get("ssid").and_then(|v| v.as_str()) == Some(ssid)
-                                    })
+                                    arr.iter()
+                                        .find(|e| e.get("ssid").and_then(|v| v.as_str()) == Some(ssid.as_str()))
                                 })
                                 .and_then(|e| e.get("pass"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let (mock, kind, ssid) = (t.mock.clone(), t.kind, ssid.clone());
-                            let submit: Submit = Rc::new(move |vals| {
-                                apply_wifi_add(
-                                    kind,
-                                    demo,
-                                    &mock,
-                                    &ssid,
-                                    vals.first().map(String::as_str).unwrap_or(""),
-                                )
-                            });
-                            t.popup = Some(PopupState {
-                                title: " wifi: change password ".into(),
-                                labels: vec!["pass"],
-                                inputs: vec![Input::with_str(&pass)],
-                                cur: 0,
-                                submit,
-                            });
+                            t.popup = Some(PopupState::new(
+                                PopupKind::WifiPass { ssid },
+                                vec![pass],
+                            ));
                             message = "Enter save · Esc cancel".into();
                         }
                     }
@@ -1211,14 +1504,81 @@ fn suspend<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<T>) -> 
     res
 }
 
-/// 执行一个设备动作:demo 不落 stdout 也不碰 BLE,直接执行(避免整屏挂起/重建
-/// 造成的闪烁);真机动作才挂起 TUI——扫描和下载有几秒的正常屏输出。
-fn run_blocking<T>(
-    terminal: &mut DefaultTerminal,
-    demo: bool,
-    f: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    if demo { f() } else { suspend(terminal, f) }
+/// 设备页连接流程按键:入口菜单 / 网页配置 / 扫描中 / 选设备 / 连接中 / 失败 /
+/// 断连弹窗时的键位(Ready 走主循环)。
+fn device_flow_key(t: &mut DeviceTab, code: KeyCode, message: &mut String) {
+    // 先折成 Copy 的小枚举,免得借用 &t.conn 卡住后面的 &mut 方法。
+    #[derive(Clone, Copy)]
+    enum Flow {
+        Fresh,
+        Menu,
+        WebSetup,
+        Scanning,
+        Pick,
+        Connecting,
+        Failed,
+        Disconnected,
+    }
+    let flow = match t.conn {
+        Conn::Fresh => Flow::Fresh,
+        Conn::Menu => Flow::Menu,
+        Conn::WebSetup { .. } => Flow::WebSetup,
+        Conn::Scanning => Flow::Scanning,
+        Conn::Pick => Flow::Pick,
+        Conn::Connecting(_) => Flow::Connecting,
+        Conn::Ready => return,
+        Conn::Failed(_) => Flow::Failed,
+        Conn::Disconnected => Flow::Disconnected,
+    };
+    match (flow, code) {
+        (Flow::Fresh, KeyCode::Enter | KeyCode::Char('r')) => t.start_scan(),
+        (Flow::Menu, KeyCode::Char('j') | KeyCode::Down) => {
+            t.menu_sel = (t.menu_sel + 1).min(1);
+        }
+        (Flow::Menu, KeyCode::Char('k') | KeyCode::Up) => {
+            t.menu_sel = t.menu_sel.saturating_sub(1);
+        }
+        (Flow::Menu, KeyCode::Enter) => match t.menu_sel {
+            0 => t.start_scan(),
+            _ => t.show_web_setup(),
+        },
+        // 数字直选(此时全局 1/2/3 切标签让位给菜单)。
+        (Flow::Menu, KeyCode::Char('1')) => t.start_scan(),
+        (Flow::Menu, KeyCode::Char('2')) => t.show_web_setup(),
+        (Flow::WebSetup, KeyCode::Esc | KeyCode::Enter) => {
+            // Esc/Enter 回菜单(Esc 惯例;Enter 兼容"看完按回车")。
+            t.conn = Conn::Menu;
+        }
+        (Flow::Scanning, KeyCode::Char('r')) => t.start_scan(),
+        (Flow::Scanning, KeyCode::Esc) => {
+            t.job = None;
+            t.conn = Conn::Menu;
+            *message = "scan cancelled".into();
+        }
+        (Flow::Pick, KeyCode::Char('j') | KeyCode::Down) => {
+            t.pick_sel = (t.pick_sel + 1).min(t.pick.len().saturating_sub(1));
+        }
+        (Flow::Pick, KeyCode::Char('k') | KeyCode::Up) => {
+            t.pick_sel = t.pick_sel.saturating_sub(1);
+        }
+        (Flow::Pick, KeyCode::Enter) => {
+            if let Some(dev) = t.pick.get(t.pick_sel).cloned() {
+                t.start_connect(dev);
+            }
+        }
+        (Flow::Pick, KeyCode::Char('r') | KeyCode::Esc) => t.start_scan(),
+        (Flow::Connecting, KeyCode::Esc) => {
+            // 弃掉连接任务/会话,回列表;设备也许还在广播,重连再试即可。
+            t.job = None;
+            t.session = None;
+            t.conn = Conn::Pick;
+            *message = "connect cancelled".into();
+        }
+        (Flow::Failed, KeyCode::Enter | KeyCode::Char('r')) => t.start_scan(),
+        // 断连弹窗:按回车确认,回扫描页(用户要求只认回车)。
+        (Flow::Disconnected, KeyCode::Enter) => t.start_scan(),
+        _ => {}
+    }
 }
 
 fn on_off(b: bool) -> &'static str {
@@ -1336,7 +1696,26 @@ fn sections_of(rows: &[DevRow]) -> Vec<Section> {
     out
 }
 
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&(usize, Input)>) {
+    // 连接流程没走完(扫描/选设备/连接/失败):整页显示流程屏。
+    if t.conn != Conn::Ready {
+        render_conn_flow(f, area, t);
+        return;
+    }
+    // 顶部一块:当前连着的设备(名字来自扫描列表的广播名)。
+    let area = if let Some(c) = &t.connected {
+        let [head, rest] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+        let line = Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Green)),
+            Span::styled(c.name.clone(), Style::default().add_modifier(Modifier::BOLD)),
+        ]);
+        f.render_widget(line, head);
+        rest
+    } else {
+        area
+    };
     let sections = sections_of(&t.rows);
     let areas = Layout::vertical(
         sections
@@ -1448,6 +1827,155 @@ fn render_device_tab(f: &mut Frame, area: Rect, t: &DeviceTab, editing: Option<&
     }
 }
 
+/// 连接流程屏(内容居中):扫描转圈 / 候选设备列表 / 连接转圈 / 失败提示 /
+/// 断连弹窗。
+fn render_conn_flow(f: &mut Frame, area: Rect, t: &DeviceTab) {
+    let frame = SPINNER[t.spin % SPINNER.len()];
+    let dim = Style::default().fg(Color::DarkGray);
+    let err = Style::default().fg(Color::Red);
+    // 各状态的内容;(弹窗标题, 行, 红 = 告警态)。
+    let (title, lines, alert): (&str, Vec<Line>, bool) = match &t.conn {
+        Conn::Ready => return,
+        Conn::Fresh => (
+            " scan ",
+            vec![
+                Line::from(" Not scanned yet"),
+                Line::from(Span::styled(" Enter/r to scan", dim)),
+            ],
+            false,
+        ),
+        Conn::Menu => {
+            let mut lines = Vec::new();
+            for (i, (num, label)) in [("1", "Scan devices"), ("2", "Configure on the web")]
+                .into_iter()
+                .enumerate()
+            {
+                let selected = i == t.menu_sel;
+                let marker = if selected { "❯" } else { " " };
+                let line = Line::from(format!(" {marker} {num}. {label}"));
+                lines.push(if selected {
+                    line.style(
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    line
+                });
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " ↑↓/1/2 select · Enter confirm · Tab switch",
+                dim,
+            )));
+            (" setup ", lines, false)
+        }
+        Conn::WebSetup { url } => (
+            " web setup ",
+            vec![
+                Line::from(" Configure via web Bluetooth — open in your browser:"),
+                Line::from(Span::styled(
+                    format!(" {url}"),
+                    Style::default().fg(Color::LightBlue),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(" Esc back", dim)),
+            ],
+            false,
+        ),
+        Conn::Scanning => (
+            " scanning ",
+            vec![
+                Line::from(format!(" {frame} Scanning for devices…")),
+                Line::from(Span::styled(" Esc cancel", dim)),
+            ],
+            false,
+        ),
+        Conn::Pick => {
+            let mut lines = vec![Line::from(format!(
+                " Found {} device(s) — pick one to configure:",
+                t.pick.len()
+            ))];
+            for (i, d) in t.pick.iter().enumerate() {
+                let selected = i == t.pick_sel;
+                let marker = if selected { "❯ " } else { "  " };
+                let line = Line::from(format!(" {marker}{}", d.name));
+                lines.push(if selected {
+                    line.style(
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    line
+                });
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " ↑↓ select · Enter connect · r rescan",
+                dim,
+            )));
+            (" devices ", lines, false)
+        }
+        Conn::Connecting(name) => (
+            " connecting ",
+            vec![
+                Line::from(format!(" {frame} Connecting to {name}…")),
+                Line::from(Span::styled(" Esc back to list", dim)),
+            ],
+            false,
+        ),
+        Conn::Failed(e) => (
+            " error ",
+            vec![
+                Line::from(Span::styled(format!(" ✗ {e}"), err)),
+                Line::from(Span::styled(" Enter/r retry", dim)),
+            ],
+            true,
+        ),
+        Conn::Disconnected => (
+            " disconnected ",
+            vec![
+                Line::from(" Device disconnected"),
+                Line::from(Span::styled(" Enter to rescan", dim)),
+            ],
+            true,
+        ),
+    };
+    let mut lines = lines;
+    // demo 提示只对设备相关的状态有意义(菜单/网页配置页没有"设备"概念)。
+    if t.demo
+        && matches!(
+            t.conn,
+            Conn::Scanning | Conn::Pick | Conn::Connecting(_) | Conn::Ready
+        )
+    {
+        lines.push(Line::from(Span::styled(" (demo fake devices)", dim)));
+    }
+    // 居中弹窗,四周边框;告警态(失败/断连)用红框。
+    let h = (lines.len() as u16 + 2).min(area.height); // +2 = 上下边框
+    let content_w = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let w = (content_w + 2 + 2) // +2 = 内容左右各留一空格,+2 = 边框
+        .clamp(22, area.width);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let border_style = if alert { err } else { Style::default() };
+    let block = Block::bordered()
+        .title(Span::styled(
+            title,
+            border_style.add_modifier(Modifier::BOLD),
+        ))
+        .border_style(border_style);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_packages_tab(f: &mut Frame, area: Rect, entries: &[Entry], sel: usize, allow_pre: bool) {
     let wide = area.width >= 78;
     let header = if wide {
@@ -1523,15 +2051,32 @@ mod tests {
     use super::*;
     use crate::ble::DeviceKind;
 
-    fn mock() -> Mock {
-        Rc::new(std::cell::RefCell::new(sample_config(DeviceKind::VibeKeys)))
+    fn mock() -> serde_json::Value {
+        sample_config(DeviceKind::VibeKeys)
     }
 
     fn tab() -> DeviceTab {
         let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
-        t.config = Some(t.mock.borrow().clone());
+        t.conn = Conn::Ready;
+        t.connected = Some(Connected {
+            name: "VibeKeys-1A2B".into(),
+        });
+        t.config = Some(t.mock.clone());
         t.rebuild_rows();
         t
+    }
+
+    fn devs() -> Vec<crate::ble::FoundDevice> {
+        vec![
+            crate::ble::FoundDevice {
+                name: "VibeKeys-1A2B".into(),
+                id: "demo-1A2B".into(),
+            },
+            crate::ble::FoundDevice {
+                name: "VibeKeys-3C4D".into(),
+                id: "demo-3C4D".into(),
+            },
+        ]
     }
 
     #[test]
@@ -1545,31 +2090,29 @@ mod tests {
 
     #[test]
     fn mock_wifi_add_upserts() {
-        let m = mock();
-        mock_wifi_add(&m, "Cafe", "pw");
-        assert_eq!(m.borrow()["wifi_list"].as_array().unwrap().len(), 3);
-        mock_wifi_add(&m, "Cafe", "pw2");
-        let list = m.borrow()["wifi_list"].clone();
-        let list = list.as_array().unwrap();
+        let mut m = mock();
+        mock_wifi_add(&mut m, "Cafe", "pw");
+        assert_eq!(m["wifi_list"].as_array().unwrap().len(), 3);
+        mock_wifi_add(&mut m, "Cafe", "pw2");
+        let list = m["wifi_list"].as_array().unwrap();
         assert_eq!(list.len(), 3);
         assert_eq!(list[2]["pass"], "pw2");
     }
 
     #[test]
     fn mock_wifi_remove_filters() {
-        let m = mock();
-        mock_wifi_remove(&m, "Home");
-        let list = m.borrow()["wifi_list"].clone();
-        let list = list.as_array().unwrap();
+        let mut m = mock();
+        mock_wifi_remove(&mut m, "Home");
+        let list = m["wifi_list"].as_array().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["ssid"], "Office");
     }
 
     #[test]
     fn mock_asr_set_keeps_unset_fields() {
-        let m = mock();
-        mock_asr_set(&m, Some("https://x"), None, Some("m2"));
-        let asr = &m.borrow()["asr_config"];
+        let mut m = mock();
+        mock_asr_set(&mut m, Some("https://x"), None, Some("m2"));
+        let asr = &m["asr_config"];
         assert_eq!(asr["uri"], "https://x");
         assert_eq!(asr["api_key"], "sk-demo");
         assert_eq!(asr["model"], "m2");
@@ -1577,9 +2120,9 @@ mod tests {
 
     #[test]
     fn mock_keymap_uses_physical_key_and_binding_parser() {
-        let m = mock();
-        mock_keymap(&m, "yolo", "\"/review\\n\"");
-        let km = &m.borrow()["keymap"];
+        let mut m = mock();
+        mock_keymap(&mut m, "yolo", "\"/review\\n\"");
+        let km = &m["keymap"];
         assert_eq!(km["SWITCH"]["type"], "text");
         assert_eq!(km["SWITCH"]["value"], "/review\n");
     }
@@ -1609,15 +2152,13 @@ mod tests {
 
     #[test]
     fn wifi_pass_edit_popup_upserts_same_ssid() {
-        let t = tab();
+        let mut t = tab();
         // 第一条 wifi 行(Home)的改密码 pop 框提交 → 同 ssid 更新,不新增。
         let rows_after = t.rows.len();
-        apply_wifi_add(DeviceKind::VibeKeys, true, &t.mock, "Home", "new-pass").unwrap();
-        let m = t.mock.borrow();
-        let list = m["wifi_list"].as_array().unwrap();
+        t.do_wifi_add("Home", "new-pass").unwrap();
+        let list = t.mock["wifi_list"].as_array().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0]["pass"], "new-pass");
-        drop(m);
         assert_eq!(t.rows.len(), rows_after);
     }
 
@@ -1632,22 +2173,137 @@ mod tests {
     }
 
     #[test]
-    fn apply_field_demo_updates_mock() {
-        let m = mock();
-        apply_field(DeviceKind::VibeKeys, true, &m, Field::ServerUrl, "mqtt://x").unwrap();
-        assert_eq!(m.borrow()["server_url"], "mqtt://x");
-        apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "ptt").unwrap();
-        assert_eq!(m.borrow()["mic_model"], 0);
-        apply_field(
-            DeviceKind::VibeKeys,
-            true,
-            &m,
-            Field::Keymap,
-            "CUSTOM=\"/compact\\n\"",
-        )
-        .unwrap();
-        assert_eq!(m.borrow()["keymap"]["CUSTOM"]["type"], "text");
-        apply_field(DeviceKind::VibeKeys, true, &m, Field::MicModel, "bogus").unwrap_err();
+    fn do_field_demo_updates_mock() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.do_field(Field::ServerUrl, "mqtt://x").unwrap();
+        assert_eq!(t.mock["server_url"], "mqtt://x");
+        t.do_field(Field::MicModel, "ptt").unwrap();
+        assert_eq!(t.mock["mic_model"], 0);
+        t.do_field(Field::Keymap, "CUSTOM=\"/compact\\n\"")
+            .unwrap();
+        assert_eq!(t.mock["keymap"]["CUSTOM"]["type"], "text");
+        t.do_field(Field::MicModel, "bogus").unwrap_err();
+    }
+
+    #[test]
+    fn scan_result_fills_pick_list_and_connect_reaches_ready() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.on_scan_result(Ok(devs()));
+        assert_eq!(t.conn, Conn::Pick);
+        assert_eq!(t.pick.len(), 2);
+        assert_eq!(t.pick_sel, 0);
+        t.start_connect(t.pick[0].clone());
+        assert_eq!(t.conn, Conn::Connecting("VibeKeys-1A2B".into()));
+        assert!(t.pending.is_some());
+        t.on_connect_result(Ok(sample_config(DeviceKind::VibeKeys)));
+        assert_eq!(t.conn, Conn::Ready);
+        // 转正后带广播名,顶部设备块用它显示。
+        assert_eq!(t.connected.as_ref().unwrap().name, "VibeKeys-1A2B");
+        assert!(!t.rows.is_empty());
+    }
+
+    #[test]
+    fn scan_and_connect_failures_land_in_failed_state() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.on_scan_result(Err(anyhow::anyhow!("no vibekeys in provisioning mode")));
+        assert!(matches!(t.conn, Conn::Failed(_)));
+        t.on_connect_result(Err(anyhow::anyhow!("connection refused")));
+        assert!(matches!(t.conn, Conn::Failed(_)));
+    }
+
+    #[test]
+    fn disconnect_event_pops_dialog_then_rescan_on_enter() {
+        let mut t = tab();
+        assert_eq!(t.conn, Conn::Ready);
+        // 看门狗/前置检查报的断连事件 → 弹窗状态。
+        let msg = t.on_session_event(crate::ble::SessionEvent::Disconnected(
+            anyhow::anyhow!("device disconnected"),
+        ));
+        assert_eq!(t.conn, Conn::Disconnected);
+        assert!(t.session.is_none());
+        assert!(msg.starts_with("device disconnected"));
+        let mut msg = String::new();
+        device_flow_key(&mut t, KeyCode::Enter, &mut msg);
+        assert_eq!(t.conn, Conn::Scanning);
+    }
+
+    #[test]
+    fn disconnect_event_while_connecting_lands_in_failed_state() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        let dev = crate::ble::FoundDevice {
+            name: "VibeKeys-1A2B".into(),
+            id: "demo-1A2B".into(),
+        };
+        t.start_connect(dev);
+        assert!(matches!(t.conn, Conn::Connecting(_)));
+        t.on_session_event(crate::ble::SessionEvent::Disconnected(
+            anyhow::anyhow!("no longer advertising"),
+        ));
+        assert!(matches!(t.conn, Conn::Failed(_)));
+    }
+
+    #[test]
+    fn ready_event_from_session_reaches_connected() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.start_connect(crate::ble::FoundDevice {
+            name: "VibeKeys-1A2B".into(),
+            id: "demo-1A2B".into(),
+        });
+        let msg = t.on_session_event(crate::ble::SessionEvent::Ready(Ok(
+            sample_config(DeviceKind::VibeKeys),
+        )));
+        assert_eq!(t.conn, Conn::Ready);
+        assert_eq!(msg, "connected");
+        assert_eq!(t.connected.as_ref().unwrap().name, "VibeKeys-1A2B");
+    }
+
+    #[test]
+    fn flow_keys_navigate_pick_and_rescan() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.on_scan_result(Ok(devs()));
+        let mut msg = String::new();
+        device_flow_key(&mut t, KeyCode::Down, &mut msg);
+        assert_eq!(t.pick_sel, 1);
+        device_flow_key(&mut t, KeyCode::Down, &mut msg);
+        assert_eq!(t.pick_sel, 1); // 不越界
+        device_flow_key(&mut t, KeyCode::Char('k'), &mut msg);
+        assert_eq!(t.pick_sel, 0);
+        device_flow_key(&mut t, KeyCode::Char('r'), &mut msg); // 重扫(demo 线程结果没人收,无碍)
+        assert_eq!(t.conn, Conn::Scanning);
+    }
+
+    #[test]
+    fn enter_shows_menu_and_menu_keys_dispatch() {
+        let mut t = DeviceTab::new(DeviceKind::VibeKeys, true);
+        t.enter();
+        assert_eq!(t.conn, Conn::Menu);
+        let mut msg = String::new();
+        // 菜单导航。
+        device_flow_key(&mut t, KeyCode::Down, &mut msg);
+        assert_eq!(t.menu_sel, 1);
+        device_flow_key(&mut t, KeyCode::Up, &mut msg);
+        assert_eq!(t.menu_sel, 0);
+        // 数字直选:1 = 扫描。
+        device_flow_key(&mut t, KeyCode::Char('1'), &mut msg);
+        assert_eq!(t.conn, Conn::Scanning);
+        // Esc 取消回菜单,2 = 网页配置。
+        device_flow_key(&mut t, KeyCode::Esc, &mut msg);
+        assert_eq!(t.conn, Conn::Menu);
+        t.menu_sel = 1;
+        device_flow_key(&mut t, KeyCode::Char('2'), &mut msg);
+        assert!(matches!(t.conn, Conn::WebSetup { .. }));
+        // Esc 回菜单。
+        device_flow_key(&mut t, KeyCode::Esc, &mut msg);
+        assert_eq!(t.conn, Conn::Menu);
+    }
+
+    #[test]
+    fn demo_devices_look_like_broadcast_names() {
+        let keys = demo_devices(DeviceKind::VibeKeys);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|d| d.name.starts_with("VibeKeys-")));
+        let watch = demo_devices(DeviceKind::Watch);
+        assert!(watch.iter().all(|d| d.name.starts_with("Watch-")));
     }
 }
 

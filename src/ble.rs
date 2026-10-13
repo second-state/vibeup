@@ -46,10 +46,48 @@ impl DeviceKind {
     }
 
     /// 广播名前缀(扫描后用它区分同 service UUID 的两台设备)。
-    fn name_prefix(self) -> &'static str {
+    pub(crate) fn name_prefix(self) -> &'static str {
         match self {
             Self::VibeKeys => "VibeKeys",
             Self::Watch => "Watch",
+        }
+    }
+
+    /// 网页配置页:各固件仓库的 GitHub Pages(assets/setup.html 部署为首页)。
+    pub fn setup_url(self) -> &'static str {
+        match self {
+            Self::VibeKeys => "https://second-state.github.io/vibekeys_firmware/",
+            Self::Watch => "https://second-state.github.io/vibewatch_firmware/",
+        }
+    }
+}
+
+/// 扫描到的候选设备(同型设备可能不止一台在广播)。
+#[derive(Clone)]
+pub struct FoundDevice {
+    pub name: String,
+    /// Peripheral id 的 Display 形式,重扫时用来精确定位同一台;存字符串是
+    /// 为了让 demo 模式能伪造假 id。
+    pub id: String,
+}
+
+/// BLE 会话目标:`kind` 必填;`device` 为空 = 该类型扫到的第一台(旧行为,
+/// CLI 用),指定 = 精确连用户在列表里选中的那一台(多台同名时不会连错)。
+#[derive(Clone)]
+pub struct Target {
+    pub kind: DeviceKind,
+    pub device: Option<String>,
+}
+
+impl Target {
+    pub fn auto(kind: DeviceKind) -> Self {
+        Self { kind, device: None }
+    }
+
+    pub fn picked(kind: DeviceKind, id: String) -> Self {
+        Self {
+            kind,
+            device: Some(id),
         }
     }
 }
@@ -119,12 +157,19 @@ async fn get_adapter() -> Result<Adapter> {
     Ok(adapter)
 }
 
-/// 按 service UUID 扫描,再按广播名前缀挑出目标设备。扫描节奏照抄
-/// vibekeys_app:每轮 100ms × 20 轮,轮间重启扫描。
-async fn scan_and_find(adapter: &Adapter, kind: DeviceKind) -> Result<Peripheral> {
+/// 一轮轮扫描收集:每轮 100ms × 20 轮,轮间重启扫描(节奏照抄 vibekeys_app)。
+/// 返回 (匹配 kind 的设备,按发现顺序去重; 出现过的其他设备名,报错用)。
+/// `stop_at_first` = 扫到第一台匹配就提前收工(CLI 直连);TUI 的设备列表要
+/// 列出全部候选,扫满整个广播窗口。
+async fn collect_scan(
+    adapter: &Adapter,
+    kind: DeviceKind,
+    stop_at_first: bool,
+) -> Result<(Vec<FoundDevice>, Vec<String>)> {
     let mut filter = ScanFilter::default();
     filter.services.push(SERVICE_ID);
     let mut seen: Vec<String> = Vec::new();
+    let mut found: Vec<FoundDevice> = Vec::new();
     adapter.start_scan(filter.clone()).await?;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -142,45 +187,119 @@ async fn scan_and_find(adapter: &Adapter, kind: DeviceKind) -> Result<Peripheral
             }
             let name = props.local_name.clone().unwrap_or_default();
             if name.starts_with(kind.name_prefix()) {
-                return Ok(p.clone());
-            }
-            if !name.is_empty() && !seen.contains(&name) {
+                let id = p.id().to_string();
+                if !found.iter().any(|f| f.id == id) {
+                    found.push(FoundDevice { name, id });
+                }
+            } else if !name.is_empty() && !seen.contains(&name) {
                 seen.push(name);
             }
         }
+        if stop_at_first && !found.is_empty() {
+            break;
+        }
         adapter.start_scan(filter.clone()).await?;
     }
-    adapter.stop_scan().await?;
+    let _ = adapter.stop_scan().await;
+    Ok((found, seen))
+}
+
+fn no_device_error(kind: DeviceKind, seen: &[String]) -> anyhow::Error {
     if seen.is_empty() {
-        bail!(
+        anyhow!(
             "no {} in provisioning mode — put it there first ({})",
             kind.name(),
             match kind {
                 DeviceKind::VibeKeys => "boot into Keyboard mode, press ACCEPT to re-advertise",
                 DeviceKind::Watch => "Setting → Enable BLE",
             }
-        );
+        )
+    } else {
+        anyhow!(
+            "found other device(s) but no {}: {} — check the device and retry",
+            kind.name(),
+            seen.join(", ")
+        )
     }
+}
+
+/// 在本 adapter 已发现的设备里按 id 找回 Peripheral 句柄(扫描刚停,设备还在
+/// 发现列表里,无需重扫)。
+async fn find_peripheral(adapter: &Adapter, id: &str) -> Result<Peripheral> {
+    for p in adapter.peripherals().await? {
+        if p.id().to_string() == id {
+            return Ok(p);
+        }
+    }
+    bail!("device {id} disappeared right after the scan")
+}
+
+/// 扫描并列出全部匹配设备(不动连接)。TUI 的设备选择列表用。
+pub fn scan_devices(kind: DeviceKind) -> Result<Vec<FoundDevice>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let adapter = get_adapter().await?;
+        let (found, seen) = collect_scan(&adapter, kind, false).await?;
+        if found.is_empty() {
+            return Err(no_device_error(kind, &seen));
+        }
+        Ok(found)
+    })
+}
+
+/// 按广播名前缀挑第一台(旧行为,CLI 直连)。
+async fn scan_and_find(adapter: &Adapter, kind: DeviceKind) -> Result<Peripheral> {
+    let (found, seen) = collect_scan(adapter, kind, true).await?;
+    match found.into_iter().next() {
+        Some(d) => find_peripheral(adapter, &d.id).await,
+        None => Err(no_device_error(kind, &seen)),
+    }
+}
+
+/// 重扫并精确定位之前选中的那台(设备仍在广播才能找到)。
+async fn scan_pick_id(adapter: &Adapter, kind: DeviceKind, id: &str) -> Result<Peripheral> {
+    let mut filter = ScanFilter::default();
+    filter.services.push(SERVICE_ID);
+    adapter.start_scan(filter.clone()).await?;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(p) = adapter
+            .peripherals()
+            .await?
+            .iter()
+            .find(|p| p.id().to_string() == id)
+            .cloned()
+        {
+            let _ = adapter.stop_scan().await;
+            return Ok(p);
+        }
+    }
+    let _ = adapter.stop_scan().await;
     bail!(
-        "found other device(s) but no {}: {} — check the device and retry",
-        kind.name(),
-        seen.join(", ")
+        "{} is no longer advertising — put it back in provisioning mode and rescan",
+        kind.name()
     )
 }
 
 /// 扫描 → 连接 → 发现服务 → 执行 `f` → 断开。一次性连接,vibeup 的配置是低频
-/// 操作,不做 vibekeys_app 那套常驻 server。
-pub fn with_device<T, F>(kind: DeviceKind, f: impl FnOnce(Peripheral) -> F) -> Result<T>
+/// 操作,不做 vibekeys_app 那套常驻 server。不往 stdout 打任何东西:TUI 会把
+/// 它放进后台线程跑,打印会花掉整屏。
+pub fn with_target<T, F>(target: Target, f: impl FnOnce(Peripheral) -> F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
+    let kind = target.kind;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
         let adapter = get_adapter().await?;
-        let p = scan_and_find(&adapter, kind).await?;
-        println!("Connecting to {}…", kind.name());
+        let p = match &target.device {
+            Some(id) => scan_pick_id(&adapter, kind, id).await?,
+            None => scan_and_find(&adapter, kind).await?,
+        };
         p.connect().await?;
         p.discover_services().await?;
         let res = f(p.clone()).await;
@@ -233,4 +352,198 @@ pub async fn reset_device(p: &Peripheral) -> Result<()> {
         Err(e) if e.to_string().to_lowercase().contains("disconnect") => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+// ===== 常驻会话(TUI 用)=====
+
+/// 会话推给 TUI 的事件。
+pub enum SessionEvent {
+    /// 连接建立,附首份 CONFIG 快照。
+    Ready(Result<serde_json::Value>),
+    /// 连接断了(检测方式见 `check_connected`)。连接建立前失败也走这里。
+    Disconnected(anyhow::Error),
+}
+
+/// 会话命令:TUI 的设备操作发到后台线程执行。
+enum SessionCmd {
+    ConfigRead {
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value>>,
+    },
+    ConfigWrite {
+        field: String,
+        value: serde_json::Value,
+        reply: std::sync::mpsc::Sender<Result<()>>,
+    },
+    KeymapWrite {
+        payload: String,
+        reply: std::sync::mpsc::Sender<Result<()>>,
+    },
+    Reset {
+        reply: std::sync::mpsc::Sender<Result<()>>,
+    },
+}
+
+/// 常驻 BLE 会话:后台线程扫到目标设备就连上并持有,TUI 的每次读写走命令
+/// 通道,免得每个动作都重扫重连。断连检测仿 vibekeys_app —— btleplug 的
+/// `is_connected` 在设备消失时可能永久挂起,所以包一层 1s 超时,超时 = 断开;
+/// 平时每 5s 轮询一次,每次收发前也先查一遍。
+pub struct Session {
+    cmd_tx: tokio::sync::mpsc::Sender<SessionCmd>,
+    events: std::sync::mpsc::Receiver<SessionEvent>,
+}
+
+impl Session {
+    /// 起一个会话线程,立刻返回句柄。连接结果(Ready/Disconnected)从
+    /// `try_event` 拿;TUI 丢掉句柄 = 命令通道关闭,线程连上后自退。
+    pub fn open(target: Target) -> Self {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let opened = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(session_loop(target, cmd_rx, &ev_tx)));
+            // 线程退出 = 断连;兜底再报一次,保证 TUI 不会干等事件。
+            if let Err(e) = opened {
+                let _ = ev_tx.send(SessionEvent::Disconnected(e));
+            }
+        });
+        Self { cmd_tx, events: ev_rx }
+    }
+
+    /// 非阻塞收一条事件。
+    pub fn try_event(&self) -> Option<SessionEvent> {
+        self.events.try_recv().ok()
+    }
+
+    /// 发一条命令等回复。会话已关(线程退出)时报错。
+    fn call<T>(
+        &self,
+        make: impl FnOnce(std::sync::mpsc::Sender<Result<T>>) -> SessionCmd,
+    ) -> Result<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cmd_tx
+            .blocking_send(make(tx))
+            .map_err(|_| anyhow!("device session is closed"))?;
+        rx.recv().map_err(|_| anyhow!("device session is closed"))?
+    }
+
+    pub fn read_config(&self) -> Result<serde_json::Value> {
+        self.call(|reply| SessionCmd::ConfigRead { reply })
+    }
+
+    pub fn write_config_field(&self, field: &str, value: serde_json::Value) -> Result<()> {
+        self.call(|reply| SessionCmd::ConfigWrite {
+            field: field.to_string(),
+            value,
+            reply,
+        })
+    }
+
+    pub fn write_keymap(&self, payload: &str) -> Result<()> {
+        self.call(|reply| SessionCmd::KeymapWrite {
+            payload: payload.to_string(),
+            reply,
+        })
+    }
+
+    pub fn reset(&self) -> Result<()> {
+        self.call(|reply| SessionCmd::Reset { reply })
+    }
+}
+
+/// vibekeys_app 的 `check_connected`:`is_connected` 包 1s 超时,超时/出错
+/// 一律按断开算(库在设备消失时会让这个调用挂死)。
+async fn check_connected(p: &Peripheral) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(1), p.is_connected())
+        .await
+        .unwrap_or(Ok(false))
+        .unwrap_or(false)
+}
+
+/// vibekeys_app 的 `loop_check_connection`:每 5s 一查,断了就返回。
+async fn until_disconnected(p: &Peripheral) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if !check_connected(p).await {
+            return;
+        }
+    }
+}
+
+async fn session_loop(
+    target: Target,
+    mut cmd_rx: tokio::sync::mpsc::Receiver<SessionCmd>,
+    ev_tx: &std::sync::mpsc::Sender<SessionEvent>,
+) -> Result<()> {
+    let adapter = get_adapter().await?;
+    let p = match &target.device {
+        Some(id) => scan_pick_id(&adapter, target.kind, id).await?,
+        None => scan_and_find(&adapter, target.kind).await?,
+    };
+    p.connect().await?;
+    p.discover_services().await?;
+    let _ = ev_tx.send(SessionEvent::Ready(read_config(&p).await));
+
+    loop {
+        tokio::select! {
+            // 断连看门狗:每 5s 探一次。
+            _ = until_disconnected(&p) => {
+                let _ = ev_tx.send(SessionEvent::Disconnected(anyhow!("device disconnected")));
+                return Ok(());
+            }
+            // 命令服务:每次收发前先查连接(vibekeys_app 同款前置检查)。
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    // TUI 侧弃用会话:安静收尾,不算断连。
+                    None => return Ok(()),
+                    Some(c) => {
+                        if !serve_cmd(&p, c, ev_tx).await {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 执行一条命令;回复一定发出(哪怕失败),TUI 才不会干等。返回 false =
+/// 连接已断,会话收尾(Disconnected 事件已发)。
+async fn serve_cmd(
+    p: &Peripheral,
+    cmd: SessionCmd,
+    ev_tx: &std::sync::mpsc::Sender<SessionEvent>,
+) -> bool {
+    // 前置连接检查(vibekeys_app 同款);不过 = 断开。
+    if !check_connected(p).await {
+        let _ = ev_tx.send(SessionEvent::Disconnected(anyhow!("device disconnected")));
+        match cmd {
+            SessionCmd::ConfigRead { reply } => {
+                let _ = reply.send(Err(anyhow!("device disconnected")));
+            }
+            SessionCmd::ConfigWrite { reply, .. }
+            | SessionCmd::KeymapWrite { reply, .. }
+            | SessionCmd::Reset { reply } => {
+                let _ = reply.send(Err(anyhow!("device disconnected")));
+            }
+        }
+        return false;
+    }
+    match cmd {
+        SessionCmd::ConfigRead { reply } => {
+            let _ = reply.send(read_config(p).await);
+        }
+        SessionCmd::ConfigWrite { field, value, reply } => {
+            let _ = reply.send(write_config_field(p, &field, value).await);
+        }
+        SessionCmd::KeymapWrite { payload, reply } => {
+            let _ = reply.send(write_char(p, KEYMAP_CONFIG_ID, payload.as_bytes()).await);
+        }
+        SessionCmd::Reset { reply } => {
+            let _ = reply.send(reset_device(p).await);
+        }
+    }
+    true
 }

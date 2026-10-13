@@ -10,7 +10,7 @@
 //! 键位 binding 语法与 `vibekeys keymap` 一致,解析逻辑移植自 vibekeys_app 的
 //! `parse_key_binding` / `unescape_string`。
 
-use crate::ble::{self, DeviceKind};
+use crate::ble::{self, DeviceKind, Target};
 use anyhow::{Result, bail};
 use btleplug::platform::Peripheral;
 
@@ -24,8 +24,8 @@ fn keys_only(kind: DeviceKind) -> Result<()> {
 }
 
 /// CONFIG 快照 pretty print。
-pub fn show(kind: DeviceKind) -> Result<()> {
-    ble::with_device(kind, |p| async move { read_and_print(&p).await })
+pub fn show(target: Target) -> Result<()> {
+    ble::with_target(target, |p| async move { read_and_print(&p).await })
 }
 
 async fn read_and_print(p: &Peripheral) -> Result<()> {
@@ -34,8 +34,8 @@ async fn read_and_print(p: &Peripheral) -> Result<()> {
     Ok(())
 }
 
-pub fn wifi(kind: DeviceKind, action: WifiAction, reset: bool) -> Result<()> {
-    ble::with_device(kind, |p| async move {
+pub fn wifi(target: Target, action: WifiAction, reset: bool) -> Result<()> {
+    ble::with_target(target, |p| async move {
         match action {
             WifiAction::Show => {
                 let cfg = ble::read_config(&p).await?;
@@ -106,8 +106,8 @@ pub enum WifiAction {
     Set { json: String },
 }
 
-pub fn server_url(kind: DeviceKind, url: String, reset: bool) -> Result<()> {
-    ble::with_device(kind, |p| async move {
+pub fn server_url(target: Target, url: String, reset: bool) -> Result<()> {
+    ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "server_url", serde_json::Value::String(url.clone())).await?;
         println!("server_url = {url}");
         maybe_reset(&p, reset).await?;
@@ -123,7 +123,7 @@ pub struct AsrOpts {
     pub clean: bool,
 }
 
-pub fn asr(kind: DeviceKind, opts: AsrOpts, reset: bool) -> Result<()> {
+pub fn asr(target: Target, opts: AsrOpts, reset: bool) -> Result<()> {
     let inner = if opts.clean {
         // 与 vibekeys_app `asr-config --clean` 一致:全空串。
         serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""})
@@ -138,7 +138,7 @@ pub fn asr(kind: DeviceKind, opts: AsrOpts, reset: bool) -> Result<()> {
             "model": opts.model,
         })
     };
-    ble::with_device(kind, |p| async move {
+    ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "asr_config", inner).await?;
         println!("asr_config updated");
         maybe_reset(&p, reset).await?;
@@ -146,14 +146,14 @@ pub fn asr(kind: DeviceKind, opts: AsrOpts, reset: bool) -> Result<()> {
     })
 }
 
-pub fn mic_model(kind: DeviceKind, mode: String, reset: bool) -> Result<()> {
-    keys_only(kind)?;
+pub fn mic_model(target: Target, mode: String, reset: bool) -> Result<()> {
+    keys_only(target.kind)?;
     let value: u8 = match mode.to_lowercase().as_str() {
         "ptt" => 0,
         "toggle" => 1,
         other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
     };
-    ble::with_device(kind, |p| async move {
+    ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "mic_model", serde_json::json!(value)).await?;
         println!("mic_model = {value}");
         maybe_reset(&p, reset).await?;
@@ -161,9 +161,9 @@ pub fn mic_model(kind: DeviceKind, mode: String, reset: bool) -> Result<()> {
     })
 }
 
-pub fn prefer_asr(kind: DeviceKind, on: bool, reset: bool) -> Result<()> {
-    keys_only(kind)?;
-    ble::with_device(kind, |p| async move {
+pub fn prefer_asr(target: Target, on: bool, reset: bool) -> Result<()> {
+    keys_only(target.kind)?;
+    ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "prefer_builtin_asr", serde_json::json!(on)).await?;
         println!("prefer_builtin_asr = {on}");
         maybe_reset(&p, reset).await?;
@@ -171,11 +171,11 @@ pub fn prefer_asr(kind: DeviceKind, on: bool, reset: bool) -> Result<()> {
     })
 }
 
-pub fn tailscale(kind: DeviceKind, key: String) -> Result<()> {
+pub fn tailscale(target: Target, key: String) -> Result<()> {
     if key.trim().is_empty() {
         bail!("empty tailscale auth key");
     }
-    ble::with_device(kind, |p| async move {
+    ble::with_target(target, |p| async move {
         // 手表上这条写是独占的:固件忽略同包其他字段,并存后立刻跳
         // Tailscale 页、断开 BLE。连接断开导致的错误视为成功。
         let res =
@@ -192,18 +192,19 @@ pub fn tailscale(kind: DeviceKind, key: String) -> Result<()> {
     })
 }
 
-pub fn keymap(kind: DeviceKind, key: String, binding: String) -> Result<()> {
-    keys_only(kind)?;
+pub fn keymap(target: Target, key: String, binding: String) -> Result<()> {
+    keys_only(target.kind)?;
     let payload = build_keymap_config(&key, &binding);
-    ble::with_device(kind, |p| async move {
+    ble::with_target(target, |p| async move {
         ble::write_char(&p, ble::KEYMAP_CONFIG_ID, payload.as_bytes()).await?;
         println!("keymap {key} updated (merged into the device keymap)");
         Ok(())
     })
 }
 
-pub fn reset(kind: DeviceKind) -> Result<()> {
-    ble::with_device(kind, |p| async move {
+pub fn reset(target: Target) -> Result<()> {
+    let kind = target.kind;
+    ble::with_target(target, |p| async move {
         ble::reset_device(&p).await?;
         println!("{} is rebooting", kind.name());
         Ok(())
@@ -234,7 +235,7 @@ pub(crate) fn physical_key_name(key: &str) -> String {
 
 /// 把 `KEY BINDING` 变成固件键位表的 JSON patch,如
 /// `{"CUSTOM": {"type": "text", "value": "/compact\n", ...}}`。
-fn build_keymap_config(key: &str, binding: &str) -> String {
+pub(crate) fn build_keymap_config(key: &str, binding: &str) -> String {
     serde_json::json!({ physical_key_name(key): parse_key_binding(binding) }).to_string()
 }
 
