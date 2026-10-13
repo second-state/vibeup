@@ -179,6 +179,14 @@ fn field_hint(field: Field) -> &'static str {
     }
 }
 
+/// 枚举选项的下一个值:当前值在列表里则取其后一个(循环),不在/为空则取第一个。
+fn next_in_cycle<'a>(values: &'a [&'a str], current: &str) -> &'a str {
+    match values.iter().position(|v| v.eq_ignore_ascii_case(current)) {
+        Some(i) => values[(i + 1) % values.len()],
+        None => values[0],
+    }
+}
+
 /// 提交一个编辑值:demo 落到假配置,真机走 config_cmd(一次 BLE 会话)。
 fn apply_field(
     kind: crate::ble::DeviceKind,
@@ -192,7 +200,6 @@ fn apply_field(
         Field::ServerUrl => {
             if demo {
                 mock_patch(mock, "server_url", val.into());
-                println!("server_url = {val} (demo)");
                 return Ok(());
             }
             config_cmd::server_url(kind, val.to_string(), false)
@@ -200,7 +207,6 @@ fn apply_field(
         Field::AsrUri => {
             if demo {
                 mock_asr_set(mock, Some(val), None, None);
-                println!("asr uri = {val} (demo)");
                 return Ok(());
             }
             config_cmd::asr(
@@ -215,7 +221,6 @@ fn apply_field(
         Field::AsrApiKey => {
             if demo {
                 mock_asr_set(mock, None, Some(val), None);
-                println!("asr api-key updated (demo)");
                 return Ok(());
             }
             config_cmd::asr(
@@ -230,7 +235,6 @@ fn apply_field(
         Field::AsrModel => {
             if demo {
                 mock_asr_set(mock, None, None, Some(val));
-                println!("asr model = {val} (demo)");
                 return Ok(());
             }
             config_cmd::asr(
@@ -250,7 +254,6 @@ fn apply_field(
                     other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
                 };
                 mock_patch(mock, "mic_model", serde_json::json!(v));
-                println!("mic_model = {v} (demo)");
                 return Ok(());
             }
             config_cmd::mic_model(kind, val.to_string(), false)
@@ -263,7 +266,6 @@ fn apply_field(
             };
             if demo {
                 mock_patch(mock, "prefer_builtin_asr", serde_json::json!(on));
-                println!("prefer_builtin_asr = {on} (demo)");
                 return Ok(());
             }
             config_cmd::prefer_asr(kind, on, false)
@@ -274,7 +276,6 @@ fn apply_field(
             };
             if demo {
                 mock_keymap(mock, key.trim(), binding.trim());
-                println!("keymap {} updated (demo)", key.trim());
                 return Ok(());
             }
             config_cmd::keymap(kind, key.trim().to_string(), binding.trim().to_string())
@@ -282,7 +283,6 @@ fn apply_field(
         Field::Tailscale => {
             if demo {
                 mock_patch(mock, "tailscale_key", val.into());
-                println!("tailscale key bound (demo)");
                 return Ok(());
             }
             config_cmd::tailscale(kind, val.to_string())
@@ -303,7 +303,6 @@ fn apply_wifi_add(
     }
     if demo {
         mock_wifi_add(mock, ssid.trim(), pass);
-        println!("wifi `{ssid}' saved (demo)");
         return Ok(());
     }
     config_cmd::wifi(
@@ -325,7 +324,6 @@ fn apply_wifi_remove(
 ) -> Result<()> {
     if demo {
         mock_wifi_remove(mock, ssid);
-        println!("wifi `{ssid}' removed (demo)");
         return Ok(());
     }
     config_cmd::wifi(
@@ -475,6 +473,11 @@ enum RowAction {
     Run(Rc<dyn Fn() -> Result<()>>),
     /// 行内单行编辑(选中回车,该行变编辑框)。
     Edit(Field),
+    /// 枚举选项:回车直接切到下一个值,不进编辑框。
+    Cycle {
+        field: Field,
+        values: Vec<&'static str>,
+    },
     /// 回车弹 pop 框分字段填写。
     Popup(PopupSpec),
     /// 一条现有 WiFi:回车弹框改密码,`d` 删除。
@@ -672,7 +675,6 @@ impl DeviceTab {
                         "asr_config",
                         serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""}),
                     );
-                    println!("asr_config cleared (demo)");
                     return Ok(());
                 }
                 config_cmd::asr(
@@ -689,26 +691,32 @@ impl DeviceTab {
         });
 
         if keys {
-            rows.push(DevRow::edit(
-                "keyboard",
-                "mic-model",
-                Field::MicModel,
-                match cfg.get("mic_model").and_then(|v| v.as_u64()) {
+            rows.push(DevRow {
+                section: "keyboard",
+                label: "mic-model".into(),
+                value: match cfg.get("mic_model").and_then(|v| v.as_u64()) {
                     Some(0) => "ptt".into(),
                     Some(1) => "toggle".into(),
                     _ => String::new(),
                 },
-            ));
-            rows.push(DevRow::edit(
-                "keyboard",
-                "prefer-asr",
-                Field::PreferAsr,
-                match cfg.get("prefer_builtin_asr").and_then(|v| v.as_bool()) {
+                action: RowAction::Cycle {
+                    field: Field::MicModel,
+                    values: vec!["ptt", "toggle"],
+                },
+            });
+            rows.push(DevRow {
+                section: "keyboard",
+                label: "prefer-asr".into(),
+                value: match cfg.get("prefer_builtin_asr").and_then(|v| v.as_bool()) {
                     Some(true) => "on".into(),
                     Some(false) => "off".into(),
                     _ => String::new(),
                 },
-            ));
+                action: RowAction::Cycle {
+                    field: Field::PreferAsr,
+                    values: vec!["on", "off"],
+                },
+            });
             rows.push(DevRow::edit(
                 "keyboard",
                 "keymap (KEY=BINDING)",
@@ -740,7 +748,6 @@ impl DeviceTab {
             value: String::new(),
             action: RowAction::Run(Rc::new(move || {
                 if demo {
-                    println!("device rebooting (demo)");
                     return Ok(());
                 }
                 config_cmd::reset(kind)
@@ -889,7 +896,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                         let state = t.popup.take().unwrap();
                         let vals: Vec<String> =
                             state.inputs.iter().map(|i| i.buf.clone()).collect();
-                        let res = suspend(&mut terminal, || (state.submit)(&vals));
+                        let res = run_blocking(&mut terminal, demo, || (state.submit)(&vals));
                         message = format!("{}: {}", state.title.trim(), describe(&res, dry_run));
                         if res.is_ok() && !dry_run {
                             t.load_config(&mut terminal);
@@ -926,7 +933,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                     };
                     let label = t.rows[idx].label.clone();
                     let (mock, kind) = (t.mock.clone(), t.kind);
-                    let res = suspend(&mut terminal, || {
+                    let res = run_blocking(&mut terminal, demo, || {
                         apply_field(kind, demo, &mock, field, &val.buf)
                     });
                     message = format!("{label}: {}", describe(&res, dry_run));
@@ -1039,7 +1046,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                 };
                 if let RowAction::WifiEntry { ssid } = &t.rows[t.sel].action {
                     let (mock, kind, ssid) = (t.mock.clone(), t.kind, ssid.clone());
-                    let res = suspend(&mut terminal, || {
+                    let res = run_blocking(&mut terminal, demo, || {
                         apply_wifi_remove(kind, demo, &mock, &ssid)
                     });
                     message = format!("wifi {ssid}: {}", describe(&res, dry_run));
@@ -1062,7 +1069,7 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                         RowAction::Run(run) => {
                             let run = run.clone();
                             let label = t.rows[t.sel].label.clone();
-                            let res = suspend(&mut terminal, || run());
+                            let res = run_blocking(&mut terminal, demo, || run());
                             message = format!("{label}: {}", describe(&res, dry_run));
                             if res.is_ok() && !dry_run {
                                 t.load_config(&mut terminal);
@@ -1072,6 +1079,20 @@ pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
                             // 预填当前值:方便只改一部分。
                             t.editing = Some((t.sel, Input::with_str(&t.rows[t.sel].value)));
                             message = "editing — Enter save · Esc cancel".into();
+                        }
+                        RowAction::Cycle { field, values } => {
+                            // 枚举选项:回车直接切到下一个值。
+                            let current = t.rows[t.sel].value.trim().to_lowercase();
+                            let next = next_in_cycle(values, &current);
+                            let (mock, kind) = (t.mock.clone(), t.kind);
+                            let (label, next) = (t.rows[t.sel].label.clone(), next.to_string());
+                            let res = run_blocking(&mut terminal, demo, || {
+                                apply_field(kind, demo, &mock, *field, &next)
+                            });
+                            message = format!("{label}: {}", describe(&res, dry_run));
+                            if res.is_ok() && !dry_run {
+                                t.load_config(&mut terminal);
+                            }
                         }
                         RowAction::Popup(spec) => {
                             t.popup = Some(PopupState::new(spec));
@@ -1188,6 +1209,16 @@ fn suspend<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<T>) -> 
     drop(_raw);
     *terminal = ratatui::init();
     res
+}
+
+/// 执行一个设备动作:demo 不落 stdout 也不碰 BLE,直接执行(避免整屏挂起/重建
+/// 造成的闪烁);真机动作才挂起 TUI——扫描和下载有几秒的正常屏输出。
+fn run_blocking<T>(
+    terminal: &mut DefaultTerminal,
+    demo: bool,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if demo { f() } else { suspend(terminal, f) }
 }
 
 fn on_off(b: bool) -> &'static str {
@@ -1588,6 +1619,16 @@ mod tests {
         assert_eq!(list[0]["pass"], "new-pass");
         drop(m);
         assert_eq!(t.rows.len(), rows_after);
+    }
+
+    #[test]
+    fn cycle_picks_next_and_wraps() {
+        let vals = ["ptt", "toggle"];
+        assert_eq!(next_in_cycle(&vals, "toggle"), "ptt");
+        assert_eq!(next_in_cycle(&vals, "ptt"), "toggle");
+        // 未知/空值 → 第一个。
+        assert_eq!(next_in_cycle(&vals, ""), "ptt");
+        assert_eq!(next_in_cycle(&vals, "bogus"), "ptt");
     }
 
     #[test]
