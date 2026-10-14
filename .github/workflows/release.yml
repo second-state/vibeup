@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 跳过预发布 tag(带 `-`),交给 prerelease.yml 处理,避免两者抢同一个 tag
+    if: ${{ !contains(inputs.release_tag || github.ref_name, '-') }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: vibeup-linux-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: vibeup-macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: vibeup-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何 x86_64 Linux 都能跑。
+      # ring(rustls 加密后端)含 C 代码,musl 下需要 musl-gcc。
+      # libdbus(btleplug → bluez)由 Cargo.toml 的 musl target 段 vendored 编译。
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp target/${{ matrix.target }}/release/vibeup.exe ${{ matrix.artifact }}
+          else
+            cp target/${{ matrix.target }}/release/vibeup ${{ matrix.artifact }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/**/*
