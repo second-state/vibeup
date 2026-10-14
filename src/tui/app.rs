@@ -1,11 +1,11 @@
 //! App:全部 TUI 状态 + 事件循环 + 按键分发。绘制是纯的
 //! `view::root(&app, 宽度) -> Element`,本层只负责改状态;设备动作走
-//! `DeviceTab::do_*`,阻塞动作(install)先 `suspend` 退出 TUI 模式。
+//! `DeviceTab::do_*`(常驻会话,瞬时),包安装/更新走后台线程 + footer 转圈。
 
 use super::device::{Conn, DeviceTab, device_flow_key};
 use super::fields::{PopupKind, PopupState, RowAction, next_in_cycle};
 use super::input::Input;
-use super::pkgs::{Entry, fetch};
+use super::pkgs::{Entry, PkgJob, PkgJobOut, PkgMenu, fetch, spawn_pkg_job};
 use super::view::{self, on_off};
 use crate::install;
 use crate::pkg::{self, PKGS, Pkg};
@@ -48,6 +48,16 @@ pub(super) struct App {
     pub(super) watch: DeviceTab,
     pub(super) pkgs: Vec<Entry>,
     pub(super) pkg_sel: usize,
+    /// Packages 页回车弹出的动作菜单。
+    pub(super) pkg_menu: Option<PkgMenu>,
+    /// 进行中的包任务(安装/更新,后台线程)。
+    pub(super) pkg_job: Option<PkgJob>,
+    /// 包任务期间 footer 的提示文案。
+    pub(super) pkg_job_label: String,
+    /// 包任务转圈帧计数。
+    pub(super) pkg_spin: usize,
+    /// 当前下载进度(后台线程写,view 读)。
+    pub(super) pkg_progress: Option<super::pkgs::SharedProgress>,
     pub(super) allow_pre: bool,
     pub(super) message: String,
     /// 管理页的安装目录。
@@ -68,6 +78,11 @@ impl App {
             watch: DeviceTab::new(crate::ble::DeviceKind::Watch, demo),
             pkgs,
             pkg_sel: 0,
+            pkg_menu: None,
+            pkg_job: None,
+            pkg_job_label: String::new(),
+            pkg_spin: 0,
+            pkg_progress: None,
             allow_pre: false,
             // 默认停在「管理」:不碰蓝牙,启动零延迟;设备页进了才连。
             message: String::from("Tab tabs · ↑↓ select · Enter run/edit · r refresh · q quit"),
@@ -127,6 +142,7 @@ impl App {
             || self.watch.job.is_some()
             || self.keys.session.is_some()
             || self.watch.session.is_some()
+            || self.pkg_job.is_some()
     }
 
     /// 空转一轮:收后台任务/会话事件、推进转圈动画。
@@ -142,6 +158,21 @@ impl App {
         }
         if let Some(m) = self.watch.poll_session() {
             self.message = m;
+        }
+        // 包任务收尾:结果进 footer,换上线程里 fetch 好的新表。
+        if let Some(job) = &self.pkg_job
+            && job.is_done()
+        {
+            if let Some(PkgJobOut::Finished(res, entries)) = job.try_recv() {
+                self.message = format!("{}: {}", self.pkg_job_label, describe(&res, self.dry_run));
+                self.pkgs = entries;
+                self.pkg_sel = self.pkg_sel.min(self.pkgs.len() - 1);
+            }
+            self.pkg_job = None;
+            self.pkg_progress = None;
+        }
+        if self.pkg_job.is_some() {
+            self.pkg_spin += 1;
         }
         for t in [&mut self.keys, &mut self.watch] {
             if t.job.is_some() || matches!(t.conn, Conn::Connecting(_)) {
@@ -193,9 +224,50 @@ impl App {
                 return Ok(false);
             }
         }
+        // Packages 页的动作菜单。
+        if self.pkg_menu.is_some() {
+            if key.code == KeyCode::Tab {
+                self.switch_tab(self.tab.next());
+            } else {
+                self.pkg_menu_key(key)?;
+            }
+            return Ok(false);
+        }
+        // 包任务进行中:忽略其余按键(footer 有提示),等收尾。
+        if self.pkg_job.is_some() {
+            return Ok(false);
+        }
 
         self.global_key(key, terminal)?;
         Ok(false)
+    }
+
+    /// Packages 页动作菜单的按键:导航 + 回车执行。
+    fn pkg_menu_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => self.pkg_menu = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(m) = self.pkg_menu.as_mut() {
+                    m.sel = (m.sel + 1).min(super::pkgs::PKG_MENU_ITEMS.len() - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(m) = self.pkg_menu.as_mut() {
+                    m.sel = m.sel.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(m) = self.pkg_menu.take() {
+                    match m.sel {
+                        0 => self.install_pkg(m.pkg, false),
+                        1 => self.install_pkg(m.pkg, true),
+                        _ => self.uninstall_pkg(m.pkg),
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn global_key(&mut self, key: KeyEvent, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -240,24 +312,49 @@ impl App {
             KeyCode::Enter => match self.tab {
                 Tab::Keys => row_action(&mut self.keys, self.dry_run, &mut self.message),
                 Tab::Watch => row_action(&mut self.watch, self.dry_run, &mut self.message),
-                Tab::Pkgs => self.install_selected(terminal)?,
+                Tab::Pkgs => {
+                    self.pkg_menu = Some(PkgMenu {
+                        pkg: self.pkg_sel,
+                        sel: 0,
+                    });
+                }
             },
-            KeyCode::Char('u') if self.tab == Tab::Pkgs => self.install_selected(terminal)?,
+            KeyCode::Char('u') if self.tab == Tab::Pkgs => self.install_selected(),
             KeyCode::Char('U') if self.tab == Tab::Pkgs => {
                 let all: Vec<(&Pkg, Option<String>)> = self
                     .pkgs
                     .iter()
                     .map(|e| (e.pkg, e.target(self.allow_pre)))
                     .collect();
-                let (dir, allow_pre, dry_run) = (self.dir.clone(), self.allow_pre, self.dry_run);
-                let res = view::suspend(terminal, || {
-                    all.iter()
-                        .map(|&(p, ref t)| install::install(p, t.clone(), allow_pre, &dir, dry_run))
-                        .collect::<Result<Vec<_>>>()
-                        .map(|_| ())
+                // 全部已最新就不动(和 install_pkg 的本地预检同理)。
+                let all_fresh = all.iter().all(|(p, t)| match t {
+                    Some(t) => {
+                        matches!(
+                            pkg::installed_version(p, &self.dir),
+                            Some(v) if pkg::normalize(&v) == pkg::normalize(t)
+                        )
+                    }
+                    None => false,
                 });
-                self.message = format!("update all: {}", describe(&res, self.dry_run));
-                fetch(&mut self.pkgs, &self.dir);
+                if all_fresh {
+                    self.message = "all packages up to date".into();
+                    return Ok(());
+                }
+                let (dir, allow_pre, dry_run) = (self.dir.clone(), self.allow_pre, self.dry_run);
+                self.pkg_job_label = "update all".into();
+                self.pkg_job = Some(spawn_pkg_job(move || {
+                    let res = all
+                        .iter()
+                        .map(|&(p, ref t)| {
+                            install::install(p, t.clone(), allow_pre, &dir, dry_run, false, &|_, _| {})
+                        })
+                        .collect::<Result<Vec<_>>>()
+                        .map(|_| ());
+                    let mut entries: Vec<Entry> = crate::pkg::PKGS.iter().map(Entry::new).collect();
+                    fetch(&mut entries, &dir);
+                    PkgJobOut::Finished(res, entries)
+                }));
+                self.message = "update all: running…".into();
             }
             _ => {}
         }
@@ -274,18 +371,54 @@ impl App {
         }
     }
 
-    /// 管理页:安装/更新选中包(阻塞,suspend 到正常屏跑)。
-    fn install_selected(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        let e = &self.pkgs[self.pkg_sel];
-        let target = e.target(self.allow_pre);
+    /// 管理页:安装/更新选中包(u 快捷键,跟随 p 的 prerelease 开关)。
+    fn install_selected(&mut self) {
+        let idx = self.pkg_sel;
+        let pre = self.allow_pre;
+        self.install_pkg(idx, pre);
+    }
+
+    /// 安装/更新 `pkgs[idx]`。已最新(纯本地检查,毫秒级)直接写 footer;
+    /// 真要下载就丢到后台线程,footer 转圈提示,完成后自动刷新表格。
+    fn install_pkg(&mut self, idx: usize, pre: bool) {
+        let e = &self.pkgs[idx];
+        let target = e.target(pre);
         let pkg = e.pkg;
-        let (dir, allow_pre, dry_run) = (self.dir.clone(), self.allow_pre, self.dry_run);
-        let res = view::suspend(terminal, || {
-            install::install(pkg, target.clone(), allow_pre, &dir, dry_run)
-        });
+        if let Some(t) = &target
+            && let Some(v) = pkg::installed_version(pkg, &self.dir)
+            && pkg::normalize(&v) == pkg::normalize(t)
+        {
+            self.message = format!("{} {v}: up to date", pkg.name);
+            return;
+        }
+        let (dir, dry_run) = (self.dir.clone(), self.dry_run);
+        self.pkg_job_label = format!("installing {}", pkg.name);
+        let progress: super::pkgs::SharedProgress =
+            std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
+        self.pkg_progress = Some(progress.clone());
+        self.pkg_job = Some(spawn_pkg_job(move || {
+            let tick = move |downloaded: u64, total: Option<u64>| {
+                *progress.lock().unwrap() = super::pkgs::DownloadProgress { downloaded, total };
+            };
+            let res = install::install(pkg, target.clone(), pre, &dir, dry_run, false, &tick);
+            let mut entries: Vec<Entry> = crate::pkg::PKGS.iter().map(Entry::new).collect();
+            fetch(&mut entries, &dir);
+            PkgJobOut::Finished(res.map(|_| ()), entries)
+        }));
+        self.message = format!("{}: installing…", pkg.name);
+    }
+
+    /// 卸载 `pkgs[idx]`:纯本地文件操作且不再打印,毫秒级完成,不挂屏。
+    fn uninstall_pkg(&mut self, idx: usize) {
+        let pkg = self.pkgs[idx].pkg;
+        if pkg::installed_version(pkg, &self.dir).is_none() {
+            self.message = format!("{}: not installed", pkg.name);
+            return;
+        }
+        let dir = self.dir.clone();
+        let res = install::uninstall(pkg, &dir);
         self.message = format!("{}: {}", pkg.name, describe(&res, self.dry_run));
         fetch(&mut self.pkgs, &self.dir);
-        Ok(())
     }
 }
 
@@ -473,6 +606,6 @@ fn default_message(tab: Tab) -> String {
     match tab {
         Tab::Keys => "vibekeys — Enter run/edit · r re-read config".into(),
         Tab::Watch => "watch — Enter run/edit · r re-read config".into(),
-        Tab::Pkgs => "packages — u update · U all · p prerelease".into(),
+        Tab::Pkgs => "packages — Enter install · u update · U all · p prerelease".into(),
     }
 }

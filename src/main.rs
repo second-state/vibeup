@@ -149,18 +149,24 @@ fn main() -> Result<()> {
         Cmd::Status => status::run(&cli.dir),
         Cmd::Install { name, tag } => {
             let p = pkg::find(&name)?;
-            install::install(
+            let log = install::install(
                 p,
                 tag,
                 false,
                 &pkg::install_dir(cli.dir.as_deref()),
                 cli.dry_run,
-            )
+                true,
+                &|_, _| {},
+            )?;
+            print!("{log}");
+            Ok(())
         }
         Cmd::Update { name, pre } => update(name.as_deref(), pre, &cli.dir, cli.dry_run),
         Cmd::Uninstall { name } => {
             let p = pkg::find(&name)?;
-            install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()))
+            let log = install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()))?;
+            print!("{log}");
+            Ok(())
         }
         Cmd::Config { cmd } => run_config(cmd),
         Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
@@ -242,9 +248,12 @@ fn update(name: Option<&str>, pre: bool, dir: &Option<PathBuf>, dry_run: bool) -
     };
     let mut failed = false;
     for p in targets {
-        if let Err(e) = install::install(p, None, pre, &dir, dry_run) {
-            eprintln!("{}: {e:#}", p.name);
-            failed = true;
+        match install::install(p, None, pre, &dir, dry_run, true, &|_, _| {}) {
+            Ok(log) => print!("{log}"),
+            Err(e) => {
+                eprintln!("{}: {e:#}", p.name);
+                failed = true;
+            }
         }
     }
     if failed {

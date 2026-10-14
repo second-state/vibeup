@@ -8,28 +8,33 @@ use super::device::{Conn, DeviceTab};
 use super::element::Element;
 use super::fields::{DevRow, PopupState, RowAction, Section, field_hint, sections_of};
 use super::input::Input;
-use super::pkgs::{Entry, short_status};
+use super::pkgs::{Entry, PkgMenu, short_status};
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// 退出 TUI 模式执行阻塞动作(install / BLE 要往正常屏幕打 stdout),完事重建 TUI。
-pub(super) fn suspend<T>(terminal: &mut ratatui::DefaultTerminal, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-    ratatui::restore();
-    // 动作执行期间(下载几秒、BLE 扫描 2-5 秒)终端在正常屏,底下是 shell。
-    // 保持 raw mode:按键不回显、不进 shell 的行缓冲,只静静排队,回来后排掉。
-    // 否则挂起窗口里敲的 `q` 之类会漏给 shell 真的执行。
-    let _raw = crossterm::terminal::enable_raw_mode();
-    let res = f();
-    // 排空挂起期间积压的按键,免得恢复后被当成 TUI 快捷键(比如 `q`)。
-    while ratatui::crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        let _ = ratatui::crossterm::event::read();
+/// 包任务在 view 层的快照:标签 + 转圈帧 + 下载进度。
+pub(super) struct PkgJobView {
+    pub(super) label: String,
+    pub(super) spin: usize,
+    pub(super) progress: Option<(u64, Option<u64>)>,
+}
+
+/// 列表行(❯ 标记选中)。
+fn option_line(text: String, selected: bool) -> Line<'static> {
+    let marker = if selected { "❯" } else { " " };
+    let line = Line::from(format!(" {marker} {text}"));
+    if selected {
+        line.style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        line
     }
-    drop(_raw);
-    *terminal = ratatui::init();
-    res
 }
 
 pub(super) fn on_off(b: bool) -> &'static str {
@@ -45,7 +50,25 @@ fn page(app: &App, width: u16) -> Element {
     match app.tab {
         Tab::Keys => device_page(&app.keys),
         Tab::Watch => device_page(&app.watch),
-        Tab::Pkgs => packages_page(&app.pkgs, app.pkg_sel, app.allow_pre, width),
+        Tab::Pkgs => packages_page(
+            &app.pkgs,
+            app.pkg_sel,
+            app.allow_pre,
+            width,
+            app.pkg_menu.as_ref(),
+            app.pkg_job.as_ref().map(|_| {
+                let progress = app
+                    .pkg_progress
+                    .as_ref()
+                    .and_then(|p| p.lock().ok())
+                    .map(|g| (g.downloaded, g.total));
+                super::view::PkgJobView {
+                    label: app.pkg_job_label.clone(),
+                    spin: app.pkg_spin,
+                    progress,
+                }
+            }),
+        ),
     }
 }
 
@@ -217,20 +240,6 @@ fn conn_flow(t: &DeviceTab) -> Element {
     let frame = SPINNER[t.spin % SPINNER.len()];
     let dim = Style::default().fg(Color::DarkGray);
     let err = Style::default().fg(Color::Red);
-    /// 列表行(❯ 标记选中)。
-    fn option_line(text: String, selected: bool) -> Line<'static> {
-        let marker = if selected { "❯" } else { " " };
-        let line = Line::from(format!(" {marker} {text}"));
-        if selected {
-            line.style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            line
-        }
-    }
     // 各状态的内容;(弹窗标题, 行, 红 = 告警态)。
     let (title, mut lines, alert): (&str, Vec<Line>, bool) = match &t.conn {
         // Ready 不走这里(device_page 已分流),兜底画空。
@@ -335,8 +344,101 @@ fn conn_flow(t: &DeviceTab) -> Element {
 
 // ===== 管理页 =====
 
-/// 包表格组件:宽屏全名,窄屏缩写。
-fn packages_page(entries: &[Entry], sel: usize, allow_pre: bool, width: u16) -> Element {
+/// 包表格组件:宽屏全名,窄屏缩写;动作菜单打开时叠一个居中模态框。
+fn packages_page(
+    entries: &[Entry],
+    sel: usize,
+    allow_pre: bool,
+    width: u16,
+    menu: Option<&PkgMenu>,
+    job: Option<PkgJobView>,
+) -> Element {
+    let table = packages_table(entries, sel, allow_pre, width);
+    let mut page = match menu {
+        Some(m) => Element::column(vec![
+            table,
+            Element::Overlay(Box::new(pkg_menu_modal(entries, m))),
+        ]),
+        None => table,
+    };
+    // 后台下载中:居中转圈模态框,挡住重复操作。
+    if let Some(job) = job {
+        let PkgJobView {
+            label,
+            spin,
+            progress,
+        } = job;
+        let frame = SPINNER[spin % SPINNER.len()];
+        let mb = |b: u64| format!("{:.1} MB", b as f64 / 1024.0 / 1024.0);
+        let progress_line = match progress {
+            Some((done, Some(total))) => {
+                let pct = done.checked_mul(100).map_or(0, |n| n / total.max(1));
+                format!(" {frame} {label}…  {} / {} ({pct}%)", mb(done), mb(total))
+            }
+            Some((done, None)) => format!(" {frame} {label}…  {} downloaded", mb(done)),
+            None => format!(" {frame} {label}…"),
+        };
+        page = Element::column(vec![
+            page,
+            Element::Overlay(Box::new(Element::Modal {
+                title: " working ".into(),
+                alert: false,
+                body: vec![
+                    Line::from(progress_line),
+                    Line::from(Span::styled(
+                        " downloading — hang on",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+            })),
+        ]);
+    }
+    page
+}
+
+/// 动作菜单模态框:标题是包名(带已装版本),安装选项尾注目标版本。
+fn pkg_menu_modal(entries: &[Entry], m: &PkgMenu) -> Element {
+    let (latest, any) = match entries.get(m.pkg) {
+        Some(e) => (e.latest.as_deref(), e.any.as_deref()),
+        None => (None, None),
+    };
+    let items = [
+        ("Install / update latest", latest),
+        ("Install prerelease", any),
+        ("Uninstall", None),
+    ];
+    let mut lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (label, ver))| {
+            let text = match ver {
+                Some(v) => format!("{}. {} ({v})", i + 1, label),
+                None => format!("{}. {}", i + 1, label),
+            };
+            option_line(text, i == m.sel)
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑↓ select · Enter confirm · Esc back",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let title = match entries.get(m.pkg) {
+        Some(e) => match &e.installed {
+            Some(v) => format!(" {} ({v}) ", e.pkg.name),
+            None => format!(" {} ", e.pkg.name),
+        },
+        None => " packages ".into(),
+    };
+    Element::Modal {
+        title,
+        alert: false,
+        body: lines,
+    }
+}
+
+/// 包表格。
+fn packages_table(entries: &[Entry], sel: usize, allow_pre: bool, width: u16) -> Element {
     let wide = width >= 78;
     let header: Vec<&'static str> = if wide {
         vec!["package", "installed", "latest", "latest-pre", "status"]

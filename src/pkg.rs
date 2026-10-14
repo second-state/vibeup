@@ -110,6 +110,10 @@ struct GhRelease {
 fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::ClientBuilder::new()
         .user_agent(concat!("vibeup/", env!("CARGO_PKG_VERSION")))
+        // API 查询很快,但 release 二进制几十 MB、慢链路(代理)可能要一两分钟;
+        // reqwest 默认 30s 总超时会把下载中途掐掉。连接超时保持灵敏,坏端点快速失败。
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(15))
         .build()?)
 }
 
