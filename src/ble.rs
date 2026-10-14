@@ -185,6 +185,13 @@ async fn collect_scan(
             if !props.services.contains(&SERVICE_ID) {
                 continue;
             }
+            // 缓存幽灵过滤:BlueZ 把连过一次的设备永久缓存,关机也在
+            // peripherals() 列表里。活着的设备只有两种状态:已连接(开机
+            // 自动重连)或在广播(rssi 有值);缓存幽灵两者皆无。
+            let connected = p.is_connected().await.unwrap_or(false);
+            if !connected && props.rssi.is_none() {
+                continue;
+            }
             let name = props.local_name.clone().unwrap_or_default();
             if name.starts_with(kind.name_prefix()) {
                 let id = p.id().to_string();
@@ -258,22 +265,30 @@ async fn scan_and_find(adapter: &Adapter, kind: DeviceKind) -> Result<Peripheral
     }
 }
 
-/// 重扫并精确定位之前选中的那台(设备仍在广播才能找到)。
+/// 重扫并精确定位之前选中的那台。和 `collect_scan` 同一套活性判断:
+/// 已连接或 rssi 有值才算,缓存幽灵不算。
 async fn scan_pick_id(adapter: &Adapter, kind: DeviceKind, id: &str) -> Result<Peripheral> {
     let mut filter = ScanFilter::default();
     filter.services.push(SERVICE_ID);
     adapter.start_scan(filter.clone()).await?;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Some(p) = adapter
-            .peripherals()
-            .await?
-            .iter()
-            .find(|p| p.id().to_string() == id)
-            .cloned()
-        {
-            let _ = adapter.stop_scan().await;
-            return Ok(p);
+        let peripherals = adapter.peripherals().await?;
+        for p in &peripherals {
+            if p.id().to_string() != id {
+                continue;
+            }
+            let connected = p.is_connected().await.unwrap_or(false);
+            let rssi = p
+                .properties()
+                .await
+                .ok()
+                .flatten()
+                .and_then(|props| props.rssi);
+            if connected || rssi.is_some() {
+                let _ = adapter.stop_scan().await;
+                return Ok(p.clone());
+            }
         }
     }
     let _ = adapter.stop_scan().await;
