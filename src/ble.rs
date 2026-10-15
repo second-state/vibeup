@@ -23,8 +23,9 @@ pub const RESET_ID: uuid::Uuid = uuid::Uuid::from_u128(0xf0e1d2c3_b4a5_6789_0abc
 /// wifi_list 最多条数,与固件 `MAX_WIFI_CREDS` 一致。
 pub const MAX_WIFI_CREDS: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DeviceKind {
+    #[default]
     VibeKeys,
     Watch,
 }
@@ -239,21 +240,6 @@ async fn find_peripheral(adapter: &Adapter, id: &str) -> Result<Peripheral> {
         }
     }
     bail!("device {id} disappeared right after the scan")
-}
-
-/// 扫描并列出全部匹配设备(不动连接)。TUI 的设备选择列表用。
-pub fn scan_devices(kind: DeviceKind) -> Result<Vec<FoundDevice>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let adapter = get_adapter().await?;
-        let (found, seen) = collect_scan(&adapter, kind, false).await?;
-        if found.is_empty() {
-            return Err(no_device_error(kind, &seen));
-        }
-        Ok(found)
-    })
 }
 
 /// 按广播名前缀挑第一台(旧行为,CLI 直连)。

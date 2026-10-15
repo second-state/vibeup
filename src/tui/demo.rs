@@ -1,7 +1,7 @@
 //! demo 模式:内存假配置 + 假设备广播名,扫描/连接用假任务走完整个流程,
 //! 不碰蓝牙。动作(`do_field` / `do_wifi_*` / …)直接落在假配置上。
 
-use super::device::{Job, JobOut, spawn_job};
+use super::actions::{spawn_job, Job, JobOut};
 use crate::ble::DeviceKind;
 use crate::config_cmd;
 

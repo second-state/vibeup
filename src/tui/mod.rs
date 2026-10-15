@@ -1,40 +1,35 @@
-//! `vibeup tui` —— 三个标签:**键盘** / **手表**(BLE 设备配置)+ **管理**
-//! (vibetty / vibekeys 的安装更新)。
+//! `vibeup tui` —— ratatui-kit 版本。
 //!
-//! Tab 或 1/2/3 切标签。设备页是连接流程:进入 tab 自动后台扫描(界面转圈不
-//! 冻结),扫到后列出候选设备让用户挑,选中连接成功才进入配置界面(见
-//! `device::Conn`)。配置界面按功能分节(server / wifi / asr / …),每行是
-//! 「动作 + 当前值」,选中后回车:可编辑项原地变成编辑框,复杂输入(加 WiFi)
-//! 弹居中的 pop 框分字段填写,立即执行的项直接跑。wifi 节是动态列表:现有
-//! 网络每条一行(回车改密码,`d` 删除),末尾固定一行 `add +` 弹框新增。
-//! 连接成功后持有常驻 BLE 会话(`ble::Session`,后台线程),设备动作瞬时完成、
-//! 断连自动弹窗(vibekeys_app 式检测);扫描/安装这类要打 stdout 或耗时的动作
-//! 先退出 TUI 模式,结束后再回来(见 `view::suspend`)。demo 模式用内存假数据
-//! 和假设备名走完同样的流程,不碰蓝牙。
+//! 三个标签:**Keyboard**(VibeKeys)/ **Watch**(VibeWatch)/ **Packages**
+//! (vibetty / vibekeys 安装更新)。架构为 ratatui-kit 的 React 式组件模型:
+//! - [`components::App`] —— 根组件:tab 状态、全局输入 handler(优先级链:
+//!   退出 > pop 框 > 行内编辑 > 连接流程 > 全局键)、`use_future` 后台轮询
+//!   (100ms 一拍:收扫描/会话/包任务事件、推进转圈动画)
+//! - [`state`] —— 全部可 Clone 渲染状态 + 后台句柄(`DeviceRuntime` 等)
+//! - [`actions`] —— 业务动作与按键分发(自由函数,操作 state + runtime)
+//! - [`demo`] —— demo 模式假数据与假任务
 //!
-//! 结构(React 式分层):
-//!
-//! - [`app`]     —— `App`:全部状态 + 事件循环 + 按键分发(只改状态,不画)
-//! - [`element`] —— `Element` 虚拟树 + 通用渲染器(相当于 react-dom)
-//! - [`view`]    —— UI 组件:纯函数 `(state, props) -> Element`,拼出整棵树
-//! - [`device`]  —— 设备页状态机:连接流程、常驻会话、设备动作
-//! - [`fields`]  —— 设备页行模型:字段 / 动作 / 弹框 / 行构建
-//! - [`input`]   —— 带光标的单行输入框
-//! - [`demo`]    —— demo 模式假数据与假任务
-//! - [`pkgs`]    —— 管理标签的包条目
+//! BLE 会话/扫描/下载仍在后台线程(线程 + channel),组件层通过轮询把结果
+//! 写回 hook 状态,waker 驱动重绘——界面不冻结、无闪屏。
 
-mod app;
+mod actions;
+mod components;
 mod demo;
-mod device;
-mod element;
-mod fields;
-mod input;
-mod pkgs;
-mod view;
+mod state;
 
 use anyhow::Result;
+use ratatui_kit::prelude::*;
 use std::path::PathBuf;
 
 pub fn run(dir: Option<PathBuf>, dry_run: bool, demo: bool) -> Result<()> {
-    app::App::new(dir, dry_run, demo).run()
+    let dir = crate::pkg::install_dir(dir.as_deref());
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            element!(components::App(dir: dir, dry_run: dry_run, demo: demo))
+                .fullscreen()
+                .await
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
