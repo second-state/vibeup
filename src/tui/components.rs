@@ -9,7 +9,7 @@ use crate::ble::DeviceKind;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
     layout::{Constraint, Direction},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Borders,
 };
@@ -45,7 +45,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
-    let message = hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions · q quit".to_string());
+    let message = hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions".to_string());
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
@@ -186,36 +186,52 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let _ = allow_pre;
 
     let tab_val = tab.get();
+    let page_children: Vec<AnyElement<'static>> = match tab_val {
+        Tab::Keyboard => vec![element!(DevicePage(..DevicePageProps { state: keys })).into()],
+        Tab::Watch => vec![element!(DevicePage(..DevicePageProps { state: watch })).into()],
+        Tab::Packages => vec![element!(PackagesPage(..PackagesPageProps {
+            state: pkg,
+            allow_pre: allow_pre.get(),
+        })).into()],
+    };
+    let page_border = ratatui_kit::components::BorderProps {
+        borders: Borders::ALL,
+        border_style: Some(Style::new().dark_gray()),
+        children: page_children,
+        ..Default::default()
+    };
     let demo_note = if props.demo { " · DEMO" } else { "" };
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
-            View(height: Constraint::Length(1)) {
-                Text(text: tab_line(tab_val))
-            }
-            View(height: Constraint::Fill(1)) {
-                match tab_val {
-                    Tab::Keyboard => {
-                        DevicePage(..DevicePageProps { state: keys })
-                    }
-                    Tab::Watch => {
-                        DevicePage(..DevicePageProps { state: watch })
-                    }
-                    Tab::Packages => {
-                        PackagesPage(..PackagesPageProps { state: pkg, allow_pre: allow_pre.get() })
-                    }
+            View(height: Constraint::Length(3)) {
+                Border(
+                    borders: Borders::ALL,
+                    border_style: Style::new().dark_gray(),
+                ) {
+                    Text(text: tab_line(tab_val))
                 }
             }
-            View(height: Constraint::Length(2)) {
-                Text(text: Line::from(format!(
-                    " vibeup {} · prerelease: {}{}",
-                    env!("CARGO_PKG_VERSION"),
-                    if allow_pre.get() { "on" } else { "off" },
-                    demo_note,
-                )))
-                Text(text: Line::from(format!(
-                    "{}  ·  q quit · Tab tabs · r refresh",
-                    message.read().clone()
-                )))
+            View(height: Constraint::Fill(1)) {
+                Border(..page_border)
+            }
+            View(height: Constraint::Length(3)) {
+                Border(
+                    borders: Borders::ALL,
+                    border_style: Style::new().dark_gray(),
+                    top_title: Line::from(format!(
+                        "vibeup {} · prerelease: {}{} ",
+                        env!("CARGO_PKG_VERSION"),
+                        if allow_pre.get() { "on" } else { "off" },
+                        demo_note,
+                    ))
+                    .right_aligned()
+                    .style(Style::new().dark_gray()),
+                ) {
+                    Text(text: Line::from(format!(
+                        " {}",
+                        message.read().clone()
+                    )))
+                }
             }
         }
     )
@@ -237,9 +253,11 @@ fn tab_line(tab: Tab) -> Line<'static> {
             };
             let text = format!(" {n} {name} ");
             let style = if *t == tab {
-                Style::new().light_blue().bold()
+                // 选中:亮蓝底 + 黑字 + 加粗。
+                Style::new().black().on_light_blue().bold()
             } else {
-                Style::new()
+                // 未选中:暗灰。
+                Style::new().dark_gray()
             };
             Span::styled(text, style)
         })
@@ -355,7 +373,7 @@ fn row_line(
     }
     let line = Line::from(spans);
     if selected {
-        line.style(Style::new().dark_gray())
+        line.style(Style::new().bg(Color::DarkGray))
     } else {
         line
     }
@@ -503,7 +521,7 @@ fn option_line(text: String, selected: bool) -> Line<'static> {
     let marker = if selected { "❯" } else { " " };
     let line = Line::from(format!(" {marker} {text}"));
     if selected {
-        line.style(Style::new().dark_gray().bold())
+        line.style(Style::new().bg(Color::DarkGray).bold())
     } else {
         line
     }
@@ -540,7 +558,7 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
             Span::raw(short(status).to_string()),
         ]);
         lines.push(if selected {
-            line.style(Style::new().dark_gray())
+            line.style(Style::new().bg(Color::DarkGray))
         } else {
             line
         });
