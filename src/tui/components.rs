@@ -286,63 +286,55 @@ pub struct DevicePageInnerProps {
 #[component]
 pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'static>> {
     let st = &props.snapshot;
-    // 连接流程没走完:整页显示流程模态框;Ready:连接指示 + 分节 fieldset + pop 框。
-    let body: AnyElement<'static> = if st.conn != Conn::Ready {
-        conn_flow(st)
-    } else {
-        let mut children: Vec<AnyElement<'static>> = Vec::new();
-        if let Some(name) = &st.connected_name {
-            children.push(element!(View(height: Constraint::Length(2)) {
+    // 连接流程没走完:整页显示流程模态框;Ready 才是配置界面。
+    if st.conn != Conn::Ready {
+        return conn_flow(st);
+    }
+    let mut children: Vec<AnyElement<'static>> = Vec::new();
+
+    // 连接指示。
+    if let Some(name) = &st.connected_name {
+        children.push(element!(View(height: Constraint::Length(2)) {
+            Text(text: Line::from(vec![
+                Span::styled(" ● ", Style::new().green()),
+                Span::styled(name.clone(), Style::new().bold()),
+            ]))
+        }).into());
+    }
+
+    // 各节:加粗节名行 + 每行一个固定高度子元素(与包表格同构,布局可靠)。
+    let mut current: Option<&'static str> = None;
+    for (i, row) in st.rows.iter().enumerate() {
+        if current != Some(row.section) {
+            current = Some(row.section);
+            // 节标题也要显式高度:裸 Text 子元素会被 kit 布局当作可伸展空间
+            // 均分,把后面的节推到底部。
+            children.push(element!(View(height: Constraint::Length(1)) {
                 Text(text: Line::from(vec![
-                    Span::styled(" ● ", Style::new().green()),
-                    Span::styled(name.clone(), Style::new().bold()),
+                    Span::styled(format!("── {} ", row.section), Style::new().bold()),
+                    Span::styled("─".repeat(40), Style::new().dark_gray()),
                 ]))
             }).into());
         }
-        for sec in super::state::sections_of(&st.rows) {
-            children.push(fieldset(st, sec));
-        }
-        if let Some(popup) = &st.popup {
-            children.push(element!(View {
-                PopupModal(popup: popup.clone())
-            }).into());
-        }
-        let vp = ratatui_kit::components::ViewProps {
-            flex_direction: Direction::Vertical,
-            children,
-            ..Default::default()
-        };
-        element!(View(..vp)).into()
-    };
+        let editing = st
+            .editing
+            .as_ref()
+            .and_then(|(idx, input)| (*idx == i).then_some(input.clone()));
+        children.push(element!(View(height: Constraint::Length(1)) {
+            Text(text: row_line(row, i == st.sel, editing.as_ref()))
+        }).into());
+    }
+    if let Some(popup) = &st.popup {
+        children.push(element!(PopupModal(popup: popup.clone())).into());
+    }
+
     let vp = ratatui_kit::components::ViewProps {
         flex_direction: Direction::Vertical,
-        children: vec![body],
+        children,
         ..Default::default()
     };
     let el: AnyElement<'static> = element!(View(..vp)).into();
     el
-}
-
-fn fieldset(st: &DeviceState, sec: super::state::Section) -> AnyElement<'static> {
-    let mut lines: Vec<AnyElement<'static>> = Vec::new();
-    for i in sec.start..sec.start + sec.len {
-        let row = &st.rows[i];
-        let selected = i == st.sel;
-        let editing = st
-            .editing
-            .as_ref()
-            .and_then(|(idx, input)| (*idx == i).then_some(input));
-        lines.push(element!(Text(
-            text: row_line(row, selected, editing)
-        )).into());
-    }
-    let bp = ratatui_kit::components::BorderProps {
-        borders: Borders::TOP,
-        top_title: Some(Line::from(format!(" {} ", sec.name)).style(Style::new().bold())),
-        children: lines,
-        ..Default::default()
-    };
-    element!(Border(..bp)).into()
 }
 
 /// 设备页一行:「动作 + 当前值」;选中反色,编辑态原地变输入框 + 块状光标。

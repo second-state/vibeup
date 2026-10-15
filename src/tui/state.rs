@@ -433,29 +433,6 @@ pub fn build_rows(kind: DeviceKind, cfg: &Value) -> Vec<DevRow> {
     rows
 }
 
-/// 连续行按 section 分组(渲染 fieldset 用)。
-#[derive(Clone, Copy)]
-pub struct Section {
-    pub name: &'static str,
-    pub start: usize,
-    pub len: usize,
-}
-
-pub fn sections_of(rows: &[DevRow]) -> Vec<Section> {
-    let mut out: Vec<Section> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        match out.last_mut() {
-            Some(s) if s.name == row.section => s.len += 1,
-            _ => out.push(Section {
-                name: row.section,
-                start: i,
-                len: 1,
-            }),
-        }
-    }
-    out
-}
-
 // ===== 包页 =====
 
 /// 管理页的一个包条目:本地已装版本 + 线上 release 查询结果。
