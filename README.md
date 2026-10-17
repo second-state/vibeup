@@ -1,5 +1,7 @@
 # vibeup
 
+English | [简体中文](docs/README.zh-CN.md)
+
 **vibeup** is the host-side installer and configuration tool for the vibe family — [vibetty](https://github.com/second-state/vibetty), [vibekeys](https://github.com/second-state/vibekeys_app), and their companion hardware (VibeKeys keyboard / VibeWatch watch).
 
 It does two things:
