@@ -105,35 +105,3 @@ vibeup tui --demo   # 用假设备假数据走完同样流程(不碰蓝牙)
 
 需要占用终端的动作(扫描、安装)会先暂时退出 TUI 模式,结束后再回来。
 
-## 添加新包
-
-在 [`src/pkg.rs`](../src/pkg.rs) 的注册表里加一行即可 —— 唯一要求是 Release 资产命名形如 `<bin>-<平台>`(如 `vibetty-linux-x64`):
-
-```rust
-Pkg { name: "mytool", repo: "second-state/mytool", bin: "mytool" },
-```
-
-## 项目结构
-
-```
-src/
-├── main.rs         CLI 定义(clap)
-├── pkg.rs          包注册表、平台资产名、已装版本与 Release 查询
-├── install.rs      下载 → 校验 → 原子安装 → symlink 切换
-├── status.rs       `vibeup status`
-├── ble.rs          BLE central:扫描/连接/读写 CONFIG characteristic
-├── config_cmd.rs   `vibeup config …`
-└── tui/            TUI,React 式分层:
-    ├── app.rs      状态 + 事件循环 + 按键分发
-    ├── element.rs  虚拟元素树 + 通用渲染器
-    ├── view.rs     UI 组件:纯函数 (state, props) -> Element
-    ├── device.rs   设备页状态机、常驻 BLE 会话
-    ├── fields.rs   行模型:字段 / 动作 / 弹框
-    ├── input.rs    带光标的单行输入框
-    ├── demo.rs     --demo 模式的假数据
-    └── pkgs.rs     包管理标签的条目
-```
-
-BLE 协议移植自 [vibekeys_app](https://github.com/second-state/vibekeys_app):两台设备共用一个 CONFIG characteristic(READ = 全量快照,WRITE = JSON 局部 patch),另有 KEYMAP characteristic 用于键位重映射、RESET characteristic(写入 ASCII `RESET` 重启设备)。
-
-musl 静态构建会用 vendored feature 从源码编译 `libdbus`(btleplug 的 BlueZ 后端);glibc 构建不受影响。
