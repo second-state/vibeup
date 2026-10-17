@@ -147,6 +147,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     {
         let dir = props.dir.clone();
         let dry_run = props.dry_run;
+        let demo = props.demo;
         hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
             let rts_arc = runtimes.read().clone();
             let mut rts = rts_arc.lock().unwrap();
@@ -170,6 +171,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 &mut prt,
                 &dir,
                 dry_run,
+                demo,
             );
             if let Some(m) = outcome.message {
                 *msg = m;
@@ -286,9 +288,13 @@ pub struct DevicePageInnerProps {
 #[component]
 pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'static>> {
     let st = &props.snapshot;
-    // 连接流程没走完:整页显示流程模态框;Ready 才是配置界面。
+    // 连接流程没走完:整页显示流程模态框。
     if st.conn != Conn::Ready {
         return conn_flow(st);
+    }
+    // keymap 弹窗打开:内容区整个切到 keymap 页(居中),不叠在配置行上。
+    if let Some(km) = &st.keymap_popup {
+        return keymap_modal(st, km);
     }
     let mut children: Vec<AnyElement<'static>> = Vec::new();
 
@@ -326,6 +332,9 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
     }
     if let Some(popup) = &st.popup {
         children.push(element!(PopupModal(popup: popup.clone())).into());
+    }
+    if let Some(km) = &st.keymap_popup {
+        children.push(keymap_modal(st, km));
     }
 
     let vp = ratatui_kit::components::ViewProps {
@@ -642,22 +651,114 @@ fn short(s: &str) -> &str {
     super::state::short_status(s)
 }
 
-// ===== 模态框组件(占满父区域,内容居中)=====
-
-#[derive(Props)]
-pub struct PopupModalProps {
-    pub popup: super::state::PopupState,
+/// keymap 编辑弹窗:自绘 Widget(手动居中 + ratatui 原生渲染)。
+/// 不走 kit 的 Center/Border children——它们的叠画/均分布局对多行内容
+/// 表现不确定,自绘完全可控。
+#[derive(Clone)]
+struct KeymapModalWidget {
+    km: super::state::KeymapPopupState,
+    cfg: serde_json::Value,
 }
 
-impl Default for PopupModalProps {
-    fn default() -> Self {
-        Self {
-            popup: super::state::PopupState::new(
-                super::state::PopupKind::WifiAdd,
-                Vec::new(),
-            ),
-        }
+impl ratatui_kit::ratatui::widgets::Widget for KeymapModalWidget {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
+        (&self).render(area, buf)
     }
+}
+
+impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
+    fn render(self, area: ratatui_kit::ratatui::layout::Rect, buf: &mut ratatui_kit::ratatui::buffer::Buffer) {
+        use ratatui_kit::ratatui::{
+            text::Line,
+            widgets::{Clear, Paragraph},
+        };
+
+        // 居中弹窗区域(宽度按最长行 + 边框,高度 = 行数 + 边框)。
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, key) in super::state::KEYMAP_KEYS.iter().enumerate() {
+            let binding = super::state::keymap_binding(&self.cfg, key);
+            if let Some((_, input)) = self.km.editing.as_ref().filter(|(idx, _)| *idx == i) {
+                let edit_style = Style::new().light_blue().bold();
+                let mut spans = vec![
+                    Span::styled(" ✎ ", Style::new().light_blue().bold()),
+                    Span::styled(format!("{key:<10}"), Style::new().bold()),
+                    Span::raw("  "),
+                ];
+                spans.extend(input.spans(true, edit_style));
+                lines.push(Line::from(spans));
+                continue;
+            }
+            let selected = i == self.km.sel;
+            let marker = if selected { "❯" } else { " " };
+            let value = if binding.is_empty() {
+                Span::styled("—", Style::new().dark_gray())
+            } else {
+                Span::raw(binding.clone())
+            };
+            let key_style = if selected { Style::new().bold() } else { Style::new() };
+            lines.push(Line::from(vec![
+                Span::raw(format!(" {marker} ")),
+                Span::styled(format!("{key:<10}"), key_style),
+                Span::raw("  "),
+                value,
+            ]));
+        }
+        lines.push(Line::from(""));
+        let hint = match &self.km.editing {
+            Some(_) => " Enter save · Esc cancel ",
+            None => " ↑↓ select · Enter edit · Esc close ",
+        };
+        lines.push(Line::from(Span::styled(hint, Style::new().dark_gray())));
+
+        let alert = false;
+        // 宽度固定,不随内容/编辑态收缩跳变。
+        let w = 52u16.min(area.width.saturating_sub(2));
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = ratatui_kit::ratatui::layout::Rect { x, y, width: w, height: h };
+
+        Clear.render(rect, buf);
+        let block = ratatui_kit::ratatui::widgets::Block::bordered()
+            .title(Span::styled(
+                " keymap ",
+                if alert { Style::new().red() } else { Style::new() }
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(if alert { Style::new().red() } else { Style::new() });
+        let inner = block.inner(rect);
+        block.render(rect, buf);
+        for (i, line) in lines.iter().enumerate() {
+            let row = ratatui_kit::ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            };
+            Paragraph::new(line.clone()).render(row, buf);
+        }
+        let _ = alert;
+    }
+}
+
+fn keymap_modal(st: &DeviceState, km: &super::state::KeymapPopupState) -> AnyElement<'static> {
+    let w = KeymapModalWidget {
+        km: km.clone(),
+        cfg: st.config.clone().unwrap_or(serde_json::Value::Null),
+    };
+    let el: AnyElement<'static> = element!(Center {
+        widget(w)
+    }).into();
+    el
+}
+
+#[derive(Props, Default)]
+pub struct PopupModalProps {
+    pub popup: super::state::PopupState,
 }
 
 #[component]
@@ -696,8 +797,7 @@ pub fn PopupModal(props: &PopupModalProps) -> impl Into<AnyElement<'static>> {
     })
 }
 
-#[derive(Props)]
-#[derive(Default)]
+#[derive(Props, Default)]
 pub struct PackagesMenuModalProps {
     pub title: String,
     pub lines: Vec<Line<'static>>,

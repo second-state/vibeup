@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 use super::demo;
 use super::state::{
-    Conn, DeviceRuntime, DeviceState, Entry, Field, next_in_cycle, PkgMenu, PkgRuntime,
+    Conn, DeviceRuntime, DeviceState, Entry, Field, next_in_cycle, KEYMAP_KEYS, keymap_binding, PkgMenu, PkgRuntime,
     PkgState, PopupKind, PopupState, RowAction, SharedProgress, DownloadProgress, PKG_MENU_ITEMS,
 };
 
@@ -78,6 +78,7 @@ pub fn spawn_pkg_job(
     PkgJob { done, rx, progress }
 }
 
+/// 阻塞执行一个设备动作(dispatch)。返回 (结果, 新配置)。
 fn no_device_error(kind: DeviceKind, seen: &[String]) -> anyhow::Error {
     if seen.is_empty() {
         anyhow::anyhow!(
@@ -454,8 +455,8 @@ fn on_session_event(
 
 /// 重读配置(r 键、动作成功后)。demo 读假数据;真机走常驻会话(瞬时)。
 /// 失败保留旧快照;断连由会话事件驱动,不走这里。
-pub fn load_config(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Option<String> {
-    if state.demo {
+pub fn load_config(demo: bool, state: &mut DeviceState, rt: &mut DeviceRuntime) -> Option<String> {
+    if demo {
         state.config = Some(rt.mock.clone());
         state.rebuild_rows();
         return None;
@@ -471,10 +472,182 @@ pub fn load_config(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Option<St
     }
 }
 
+/// 写单个键位绑定(demo 落假配置,真机走常驻会话)。
+pub fn do_keymap(demo: bool, rt: &mut DeviceRuntime, key: &str, binding: &str) -> Result<()> {
+    if demo {
+        demo::mock_keymap(&mut rt.mock, key, binding);
+        return Ok(());
+    }
+    let payload = config_cmd::build_keymap_config(key, binding);
+    rt.session
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("device session is closed"))?
+        .write_keymap(&payload)
+}
+
+/// keymap 弹窗按键。返回 Some(message) = 已消费。
+pub fn keymap_popup_key(
+    state: &mut DeviceState,
+    rt: &mut DeviceRuntime,
+    demo: bool,
+    key: &KeyEvent,
+) -> Option<String> {
+    let (mut sel, editing) = {
+        let km = state.keymap_popup.as_ref()?;
+        (km.sel, km.editing.clone())
+    };
+
+    // 编辑模式:输入/保存/取消。
+    if let Some((idx, input)) = &editing {
+        std::fs::write("/tmp/tui_key.log", format!("{key:?}\n")).ok();
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(km) = state.keymap_popup.as_mut() {
+                    km.editing = None;
+                }
+                return Some("edit cancelled".into());
+            }
+            KeyCode::Enter => {
+                let binding = input.buf.trim().to_string();
+                if binding.is_empty() {
+                    return Some(
+                        "binding must not be empty — type one or Esc to cancel".into(),
+                    );
+                }
+                let keyname = KEYMAP_KEYS[*idx];
+                let res = do_keymap(demo, rt, keyname, &binding);
+                if let Some(km) = state.keymap_popup.as_mut() {
+                    km.editing = None;
+                }
+                let mut m = format!("{keyname}: {}", describe(&res, demo));
+                if res.is_ok()
+                    && let Some(err) = load_config(demo, state, rt)
+                {
+                    m.push_str(&format!(" · read failed: {err}"));
+                }
+                return Some(m);
+            }
+            KeyCode::Backspace => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.backspace();
+                    }
+                return None;
+            }
+            KeyCode::Delete => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.delete();
+                    }
+                return None;
+            }
+            KeyCode::Left => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.left();
+                    }
+                return None;
+            }
+            KeyCode::Right => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.right();
+                    }
+                return None;
+            }
+            KeyCode::Home => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.home();
+                    }
+                return None;
+            }
+            KeyCode::End => {
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut() {
+                        input.end();
+                    }
+                return None;
+            }
+            KeyCode::Char(c) => {
+                // 键位绑定只要 ASCII:中文等字符直接忽略。
+                if !c.is_ascii() {
+                    return None;
+                }
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let alt = key.modifiers.contains(KeyModifiers::ALT);
+                if ctrl || alt {
+                    // 修饰键组合:捕捉按键本身,整体替换输入(Ctrl+C → "Ctrl+C")。
+                    let mut combo = String::new();
+                    if ctrl {
+                        combo.push_str("Ctrl+");
+                    }
+                    if alt {
+                        combo.push_str("Alt+");
+                    }
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        combo.push_str("Shift+");
+                    }
+                    combo.push(c.to_ascii_uppercase());
+                    if let Some(km) = state.keymap_popup.as_mut()
+                        && let Some((_, input)) = km.editing.as_mut()
+                    {
+                        input.buf = combo;
+                        input.pos = input.buf.chars().count();
+                    }
+                    return None;
+                }
+                // 无 Ctrl/Alt(含单独 Shift)= 普通打字。
+                if let Some(km) = state.keymap_popup.as_mut()
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.insert(c);
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
+    // 浏览模式:导航 / 进入编辑 / 关闭。
+    match key.code {
+        KeyCode::Esc => {
+            state.keymap_popup = None;
+            Some("keymap closed".into())
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            sel = (sel + 1).min(KEYMAP_KEYS.len() - 1);
+            if let Some(km) = state.keymap_popup.as_mut() {
+                km.sel = sel;
+            }
+            None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            sel = sel.saturating_sub(1);
+            if let Some(km) = state.keymap_popup.as_mut() {
+                km.sel = sel;
+            }
+            None
+        }
+        KeyCode::Enter => {
+            let keyname = KEYMAP_KEYS[sel];
+            let current = keymap_binding(
+                state.config.as_ref().unwrap_or(&serde_json::Value::Null),
+                keyname,
+            );
+            if let Some(km) = state.keymap_popup.as_mut() {
+                km.editing = Some((sel, super::state::Input::with_str(&current)));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// 动作成功后的善后:重读配置,失败顶 footer。
-fn after_action(state: &mut DeviceState, rt: &mut DeviceRuntime, ok: bool, message: &mut String) {
+fn after_action(demo: bool, state: &mut DeviceState, rt: &mut DeviceRuntime, ok: bool, message: &mut String) {
     if ok
-        && let Some(err) = load_config(state, rt)
+        && let Some(err) = load_config(demo, state, rt)
     {
         *message = format!("read failed: {err}");
     }
@@ -489,7 +662,7 @@ fn session_of(rt: &DeviceRuntime) -> Result<&ble::Session> {
 }
 
 pub fn do_field(
-    state: &mut DeviceState,
+    demo: bool,
     rt: &mut DeviceRuntime,
     field: Field,
     val: &str,
@@ -500,14 +673,14 @@ pub fn do_field(
     };
     match field {
         Field::ServerUrl => {
-            if state.demo {
+            if demo {
                 rt.mock["server_url"] = val.into();
                 return Ok(());
             }
             write(rt, "server_url", val.into())
         }
         Field::AsrUri => {
-            if state.demo {
+            if demo {
                 demo::mock_asr_set(&mut rt.mock, Some(val), None, None);
                 return Ok(());
             }
@@ -523,7 +696,7 @@ pub fn do_field(
             )
         }
         Field::AsrApiKey => {
-            if state.demo {
+            if demo {
                 demo::mock_asr_set(&mut rt.mock, None, Some(val), None);
                 return Ok(());
             }
@@ -539,7 +712,7 @@ pub fn do_field(
             )
         }
         Field::AsrModel => {
-            if state.demo {
+            if demo {
                 demo::mock_asr_set(&mut rt.mock, None, None, Some(val));
                 return Ok(());
             }
@@ -560,7 +733,7 @@ pub fn do_field(
                 "toggle" => 1,
                 other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
             };
-            if state.demo {
+            if demo {
                 rt.mock["mic_model"] = serde_json::json!(v);
                 return Ok(());
             }
@@ -572,25 +745,14 @@ pub fn do_field(
                 "off" | "false" => false,
                 other => bail!("invalid value `{other}` — use on or off"),
             };
-            if state.demo {
+            if demo {
                 rt.mock["prefer_builtin_asr"] = serde_json::json!(on);
                 return Ok(());
             }
             write(rt, "prefer_builtin_asr", serde_json::json!(on))
         }
-        Field::Keymap => {
-            let Some((key, binding)) = val.split_once('=') else {
-                bail!("expected `KEY=BINDING`, e.g. CUSTOM=\"/compact\\n\"");
-            };
-            if state.demo {
-                demo::mock_keymap(&mut rt.mock, key.trim(), binding.trim());
-                return Ok(());
-            }
-            let payload = config_cmd::build_keymap_config(key.trim(), binding.trim());
-            session_of(rt)?.write_keymap(&payload)
-        }
         Field::Tailscale => {
-            if state.demo {
+            if demo {
                 rt.mock["tailscale_key"] = val.into();
                 return Ok(());
             }
@@ -606,7 +768,7 @@ pub fn do_field(
 
 /// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机读-改-写整个列表。
 pub fn do_wifi_add(
-    state: &mut DeviceState,
+    demo: bool,
     rt: &mut DeviceRuntime,
     ssid: &str,
     pass: &str,
@@ -614,7 +776,7 @@ pub fn do_wifi_add(
     if ssid.trim().is_empty() {
         bail!("ssid must not be empty");
     }
-    if state.demo {
+    if demo {
         demo::mock_wifi_add(&mut rt.mock, ssid.trim(), pass);
         return Ok(());
     }
@@ -636,8 +798,8 @@ pub fn do_wifi_add(
 }
 
 /// WiFi 删除。
-pub fn do_wifi_remove(state: &mut DeviceState, rt: &mut DeviceRuntime, ssid: &str) -> Result<()> {
-    if state.demo {
+pub fn do_wifi_remove(demo: bool, rt: &mut DeviceRuntime, ssid: &str) -> Result<()> {
+    if demo {
         demo::mock_wifi_remove(&mut rt.mock, ssid);
         return Ok(());
     }
@@ -651,8 +813,8 @@ pub fn do_wifi_remove(state: &mut DeviceState, rt: &mut DeviceRuntime, ssid: &st
 }
 
 /// 清空 ASR 配置(与 vibekeys_app `asr-config --clean` 一致:全空串)。
-pub fn do_asr_clear(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Result<()> {
-    if state.demo {
+pub fn do_asr_clear(demo: bool, rt: &mut DeviceRuntime) -> Result<()> {
+    if demo {
         rt.mock["asr_config"] =
             serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""});
         return Ok(());
@@ -664,8 +826,8 @@ pub fn do_asr_clear(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Result<(
 }
 
 /// 设备重启使已存配置生效。重启会掐断连接,断连事件随后到 → 弹窗。
-pub fn do_reset(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Result<()> {
-    if state.demo {
+pub fn do_reset(demo: bool, rt: &mut DeviceRuntime) -> Result<()> {
+    if demo {
         return Ok(());
     }
     session_of(rt)?.reset()
@@ -709,6 +871,7 @@ pub fn handle_key(
     pkg_rt: &mut PkgRuntime,
     dir: &Path,
     dry_run: bool,
+    demo: bool,
 ) -> KeyOutcome {
     let Event::Key(key) = ev else {
         return KeyOutcome::none();
@@ -746,6 +909,18 @@ pub fn handle_key(
             }
             let state_demo = state.demo;
             if let Some(m) = popup_key(state, rt, state_demo, &key) {
+                return KeyOutcome::msg(m);
+            }
+            return KeyOutcome::msg(std::mem::take(&mut message));
+        }
+        // keymap 弹窗独占按键(Tab 仍可切标签)。
+        if state.keymap_popup.is_some() {
+            if code == KeyCode::Tab {
+                switch_tab(&mut tab, keys, watch, &mut message);
+                return KeyOutcome::msg(std::mem::take(&mut message));
+            }
+            let state_demo = state.demo;
+            if let Some(m) = keymap_popup_key(state, rt, state_demo, &key) {
                 return KeyOutcome::msg(m);
             }
             return KeyOutcome::msg(std::mem::take(&mut message));
@@ -798,13 +973,13 @@ pub fn handle_key(
                 state.sel = (state.sel + 1).min(state.rows.len() - 1);
             }
             KeyCode::Char('k') | KeyCode::Up => state.sel = state.sel.saturating_sub(1),
-            KeyCode::Char('d') => wifi_remove_action(state, rt, state.demo, &mut message),
+            KeyCode::Char('d') => wifi_remove_action(state, rt, demo, &mut message),
             KeyCode::Char('r') => {
-                if let Some(err) = load_config(state, rt) {
+                if let Some(err) = load_config(demo, state, rt) {
                     message = format!("read failed: {err}");
                 }
             }
-            KeyCode::Enter => row_action(state, rt, state.demo, &mut message),
+            KeyCode::Enter => row_action(state, rt, demo, &mut message),
             _ => {}
         }
         return KeyOutcome::msg(std::mem::take(&mut message));
@@ -1001,20 +1176,20 @@ fn popup_key(
             let title = state_kind.spec().0.trim().to_string();
             let res = match &state_kind {
                 PopupKind::WifiAdd => do_wifi_add(
-                    state,
+                    demo,
                     rt,
                     vals.first().map(String::as_str).unwrap_or(""),
                     vals.get(1).map(String::as_str).unwrap_or(""),
                 ),
                 PopupKind::WifiPass { ssid } => do_wifi_add(
-                    state,
+                    demo,
                     rt,
                     ssid,
                     vals.first().map(String::as_str).unwrap_or(""),
                 ),
             };
             let mut m = format!("{title}: {}", describe(&res, demo));
-            after_action(state, rt, res.is_ok(), &mut m);
+            after_action(demo, state, rt, res.is_ok(), &mut m);
             Some(m)
         }
         KeyCode::Char(c) => {
@@ -1045,9 +1220,9 @@ fn editing_key(
                 _ => unreachable!(),
             };
             let label = state.rows[idx].label.clone();
-            let res = do_field(state, rt, field, &val.buf);
+            let res = do_field(demo, rt, field, &val.buf);
             let mut m = format!("{label}: {}", describe(&res, demo));
-            after_action(state, rt, res.is_ok(), &mut m);
+            after_action(demo, state, rt, res.is_ok(), &mut m);
             Some(m)
         }
         KeyCode::Backspace => {
@@ -1173,9 +1348,9 @@ fn wifi_remove_action(
         RowAction::WifiEntry { ssid } => ssid.clone(),
         _ => return,
     };
-    let res = do_wifi_remove(state, rt, &ssid);
+    let res = do_wifi_remove(demo, rt, &ssid);
     *message = format!("wifi {ssid}: {}", describe(&res, demo));
-    after_action(state, rt, res.is_ok(), message);
+    after_action(demo, state, rt, res.is_ok(), message);
 }
 
 fn row_action(
@@ -1190,11 +1365,11 @@ fn row_action(
         RowAction::AsrClear | RowAction::ResetDevice => {
             let label = state.rows[state.sel].label.clone();
             let res = match action {
-                RowAction::AsrClear => do_asr_clear(state, rt),
-                _ => do_reset(state, rt),
+                RowAction::AsrClear => do_asr_clear(demo, rt),
+                _ => do_reset(demo, rt),
             };
             *message = format!("{label}: {}", describe(&res, demo));
-            after_action(state, rt, res.is_ok(), message);
+            after_action(demo, state, rt, res.is_ok(), message);
         }
         RowAction::Edit(_) => {
             // 预填当前值:方便只改一部分。
@@ -1206,13 +1381,17 @@ fn row_action(
             let current = state.rows[state.sel].value.trim().to_lowercase();
             let next = next_in_cycle(&values, &current);
             let label = state.rows[state.sel].label.clone();
-            let res = do_field(state, rt, field, next);
+            let res = do_field(demo, rt, field, next);
             *message = format!("{label}: {}", describe(&res, demo));
-            after_action(state, rt, res.is_ok(), message);
+            after_action(demo, state, rt, res.is_ok(), message);
         }
         RowAction::Popup(kind) => {
             state.popup = Some(PopupState::new(kind, Vec::new()));
             *message = "Tab/↑↓ field · Enter save · Esc cancel".into();
+        }
+        RowAction::KeymapPopup => {
+            state.keymap_popup = Some(super::state::KeymapPopupState::default());
+            *message = "↑↓ key · Enter edit · Esc close".into();
         }
         RowAction::WifiEntry { ssid } => {
             // 从快照里拿当前密码,弹框改;提交 = 同 ssid 覆盖。

@@ -419,15 +419,20 @@ impl Session {
     }
 
     /// 发一条命令等回复。会话已关(线程退出)时报错。
+    /// 用 `try_send` + `recv_timeout` 而非 `blocking_send` + `recv`:
+    /// UI 事件 handler 跑在 tokio runtime 线程上,`blocking_send` 在那里
+    /// 会 panic("cannot block from within a runtime"),`recv` 也会阻塞
+    /// worker;`try_send` 非阻塞、`recv_timeout` 有界,ms 级往返完全够用。
     fn call<T>(
         &self,
         make: impl FnOnce(std::sync::mpsc::Sender<Result<T>>) -> SessionCmd,
     ) -> Result<T> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.cmd_tx
-            .blocking_send(make(tx))
+            .try_send(make(tx))
             .map_err(|_| anyhow!("device session is closed"))?;
-        rx.recv().map_err(|_| anyhow!("device session is closed"))?
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| anyhow!("device session is closed"))?
     }
 
     pub fn read_config(&self) -> Result<serde_json::Value> {

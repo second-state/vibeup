@@ -160,9 +160,10 @@ impl Input {
 }
 
 /// pop 框种类。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum PopupKind {
     /// 新增 WiFi:ssid + pass 两个字段。
+    #[default]
     WifiAdd,
     /// 改某条 WiFi 的密码。
     WifiPass { ssid: String },
@@ -179,7 +180,7 @@ impl PopupKind {
 }
 
 /// 运行中的 pop 框:字段展开成带光标的输入,提交按 kind 分发。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PopupState {
     pub kind: PopupKind,
     pub title: String,
@@ -206,6 +207,46 @@ impl PopupState {
     }
 }
 
+/// keymap 编辑弹窗:键列表光标 + 可选的行内编辑(None = 浏览模式)。
+#[derive(Clone, Default)]
+pub struct KeymapPopupState {
+    pub sel: usize,
+    pub editing: Option<(usize, Input)>,
+}
+
+/// 固件支持键位重映射的物理键(固件 bt_keyboard_mode.rs 的 KeymapConfig)。
+/// YOLO 是 SWITCH 的用户别名。
+pub const KEYMAP_KEYS: [&str; 8] = [
+    "MIC",
+    "CUSTOM",
+    "ESC",
+    "NEXT",
+    "BACKSPACE",
+    "SWITCH",
+    "ACCEPT",
+    "ROTATE",
+];
+
+/// 键位的当前绑定显示:优先 raw(用户原始输入),兜底紧凑序列化。
+pub fn keymap_binding(cfg: &Value, key: &str) -> String {
+    match cfg.get("keymap").and_then(|m| m.get(key)) {
+        Some(b) => {
+            let raw = b.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+            if !raw.is_empty() {
+                return raw.to_string();
+            }
+            // raw 为空的绑定(历史空文本宏)视作未设置。
+            let value = b.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if value.is_empty() && b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                String::new()
+            } else {
+                b.to_string()
+            }
+        }
+        None => String::new(),
+    }
+}
+
 /// 可编辑字段:决定行内编辑提交时调用哪个动作。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -215,7 +256,6 @@ pub enum Field {
     AsrModel,
     MicModel,
     PreferAsr,
-    Keymap,
     Tailscale,
 }
 
@@ -228,7 +268,6 @@ pub fn field_hint(field: Field) -> &'static str {
         Field::AsrModel => "whisper-1",
         Field::MicModel => "ptt | toggle",
         Field::PreferAsr => "on | off",
-        Field::Keymap => "KEY=BINDING, e.g. CUSTOM=\"/compact\\n\"",
         Field::Tailscale => "tskey-auth-…",
     }
 }
@@ -276,6 +315,8 @@ pub enum RowAction {
     },
     /// 回车弹 pop 框分字段填写。
     Popup(PopupKind),
+    /// 回车打开 keymap 编辑弹窗。
+    KeymapPopup,
     /// 一条现有 WiFi:回车弹框改密码,`d` 删除。
     WifiEntry { ssid: String },
 }
@@ -398,19 +439,17 @@ pub fn build_rows(kind: DeviceKind, cfg: &Value) -> Vec<DevRow> {
                 values: vec!["on", "off"],
             },
         });
-        rows.push(DevRow::edit(
-            "keyboard",
-            "keymap (KEY=BINDING)",
-            Field::Keymap,
-            match cfg.get("keymap").and_then(|v| v.as_object()) {
-                Some(m) if !m.is_empty() => m
-                    .iter()
-                    .map(|(k, val)| format!("{k}={val}"))
-                    .collect::<Vec<_>>()
-                    .join("  "),
-                _ => String::new(),
-            },
-        ));
+        // keymap 按钮:回车打开键位编辑弹窗。
+        let configured = KEYMAP_KEYS
+            .iter()
+            .filter(|k| !keymap_binding(cfg, k).is_empty())
+            .count();
+        rows.push(DevRow {
+            section: "keyboard",
+            label: "keymap".into(),
+            value: format!("{configured} set"),
+            action: RowAction::KeymapPopup,
+        });
     }
 
     rows.push(DevRow::edit(
@@ -539,6 +578,7 @@ pub type SharedProgress = Arc<Mutex<DownloadProgress>>;
 pub struct PkgState {
     pub entries: Vec<Entry>,
     pub sel: usize,
+    /// 包页待执行动作(卸载;阻塞,后台执行)。
     /// r 键请求的后台刷新(ticker 取走执行)。
     pub refresh_pending: bool,
     /// 包页动作的 footer 消息(install_pkg/update_all/uninstall_pkg 写,调用方透出)。
@@ -571,7 +611,10 @@ pub struct DeviceState {
     pub spin: usize,
     pub editing: Option<(usize, Input)>,
     pub popup: Option<PopupState>,
+    /// keymap 编辑弹窗(键位列表 + 行内编辑)。
+    pub keymap_popup: Option<KeymapPopupState>,
 }
+
 
 impl DeviceState {
     pub fn new(kind: DeviceKind, demo: bool) -> Self {
