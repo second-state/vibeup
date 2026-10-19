@@ -1025,16 +1025,16 @@ pub fn handle_key(
     // ---- 全局键 ----
     match code {
         KeyCode::Char('1') => {
+            switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+        }
+        KeyCode::Char('2') => {
             switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch);
             return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
         }
-        KeyCode::Char('2') => {
+        KeyCode::Char('3') => {
             switch_to(&mut tab, super::state::Tab::Watch, keys, watch);
             return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
-        }
-        KeyCode::Char('3') => {
-            switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
         }
         KeyCode::Tab => {
             let next = tab.get().next();

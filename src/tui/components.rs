@@ -240,18 +240,18 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 }
 
 fn tab_line(tab: Tab) -> Line<'static> {
-    let spans: Vec<Span> = [Tab::Keyboard, Tab::Watch, Tab::Packages]
+    let spans: Vec<Span> = [Tab::Packages, Tab::Keyboard, Tab::Watch]
         .iter()
         .map(|t| {
             let n = match t {
-                Tab::Keyboard => 1,
-                Tab::Watch => 2,
-                Tab::Packages => 3,
+                Tab::Packages => 1,
+                Tab::Keyboard => 2,
+                Tab::Watch => 3,
             };
             let name = match t {
+                Tab::Packages => "Packages",
                 Tab::Keyboard => "Keyboard",
                 Tab::Watch => "Watch",
-                Tab::Packages => "Packages",
             };
             let text = format!(" {n} {name} ");
             let style = if *t == tab {
@@ -384,10 +384,10 @@ fn row_line(
 /// 列表 / 连接转圈 / 失败提示 / 断连弹窗。告警态(失败/断连)红框。
 fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
     let frame = SPINNER[st.spin % SPINNER.len()];
-    let (title, mut lines, alert, content_w) = match &st.conn {
+    let (title, mut lines, alert, content_w): (String, Vec<Line>, bool, usize) = match &st.conn {
         Conn::Ready => return element!(Fragment { }).into(),
         Conn::Fresh => (
-            " scan ",
+            " scan ".into(),
             vec![
                 Line::from(" Not scanned yet"),
                 Line::from(Span::styled(" Enter/r to scan", dim())),
@@ -396,6 +396,10 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             20,
         ),
         Conn::Menu => {
+            let device_label = match st.kind {
+                DeviceKind::VibeKeys => "keyboard",
+                DeviceKind::Watch => "watch",
+            };
             let mut lines: Vec<Line> = ["Scan devices", "Configure on the web"]
                 .into_iter()
                 .enumerate()
@@ -406,12 +410,12 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
                 " ↑↓/1/2 select · Enter confirm · Tab switch",
                 dim(),
             )));
-            (" setup ", lines, false, 40)
+            (format!(" {device_label} setup "), lines, false, 40)
         }
         Conn::WebSetup => {
             let url = st.web_url.unwrap_or("");
             (
-                " web setup ",
+                " web setup ".into(),
                 vec![
                     Line::from(" Configure via web Bluetooth — open in your browser:"),
                     Line::from(Span::styled(url, Style::new().light_blue())),
@@ -423,7 +427,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             )
         }
         Conn::Scanning => (
-            " scanning ",
+            " scanning ".into(),
             vec![
                 Line::from(format!(" {frame} Scanning for devices…")),
                 Line::from(Span::styled(" Esc cancel", dim())),
@@ -451,10 +455,10 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
                 " ↑↓ select · Enter connect · r rescan",
                 dim(),
             )));
-            (" devices ", lines, false, w)
+            (" devices ".into(), lines, false, w)
         }
         Conn::Connecting(name) => (
-            " connecting ",
+            format!(" connecting "),
             vec![
                 Line::from(format!(" {frame} Connecting to {name}…")),
                 Line::from(Span::styled(" Esc back to list", dim())),
@@ -463,7 +467,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             name.len() + 34,
         ),
         Conn::Failed(e) => (
-            " error ",
+            " error ".to_string(),
             vec![
                 Line::from(Span::styled(format!(" ✗ {e}"), err_style())),
                 Line::from(Span::styled(" Enter/r retry", dim())),
@@ -472,7 +476,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             40,
         ),
         Conn::Disconnected => (
-            " disconnected ",
+            " disconnected ".to_string(),
             vec![
                 Line::from(" Device disconnected"),
                 Line::from(Span::styled(" Enter to rescan", dim())),
@@ -489,7 +493,8 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
     {
         lines.push(Line::from(Span::styled(" (demo fake devices)", dim())));
     }
-    modal(title, lines, alert, content_w)
+    let title_ref: &str = &title;
+    modal(title_ref, lines, alert, content_w)
 }
 
 // ===== 公共渲染小件 =====

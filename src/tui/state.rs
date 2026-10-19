@@ -15,18 +15,18 @@ use std::sync::{Arc, Mutex};
 /// 三个标签:键盘 / 手表(BLE 设备配置)+ 管理(vibetty / vibekeys 安装更新)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Tab {
-    Keyboard,
-    Watch,
     #[default]
     Packages,
+    Keyboard,
+    Watch,
 }
 
 impl Tab {
     pub fn next(self) -> Self {
         match self {
+            Self::Packages => Self::Keyboard,
             Self::Keyboard => Self::Watch,
             Self::Watch => Self::Packages,
-            Self::Packages => Self::Keyboard,
         }
     }
 }
