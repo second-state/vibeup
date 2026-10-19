@@ -25,6 +25,10 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             artifact: vibeup-linux-arm64
+            # musl 静态链接下没有 glibc 的 libatomic;GCC 默认 outline-atomics
+            # 会生成对 __aarch64_ldadd4_sync 等 libatomic 符号的调用导致链接失败,
+            # 关掉它让原子操作内联(vendored libdbus 的 C 代码需要)。
+            cflags: -mno-outline-atomics
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: vibeup-macos-arm64
@@ -49,6 +53,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
+        env:
+          CFLAGS_aarch64_unknown_linux_musl: ${{ matrix.cflags }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename artifact
