@@ -14,6 +14,13 @@ pub struct Pkg {
     pub bin: &'static str,
 }
 
+/// vibeup 自身(供 `uninstall self` 使用)。
+pub static SELF: Pkg = Pkg {
+    name: "vibeup",
+    repo: "second-state/vibeup",
+    bin: "vibeup",
+};
+
 /// 注册表:加新包只需在这里加一行,前提是 Release 资产叫 `<bin>-<平台>`。
 pub const PKGS: &[Pkg] = &[
     Pkg {

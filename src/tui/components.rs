@@ -458,7 +458,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             (" devices ".into(), lines, false, w)
         }
         Conn::Connecting(name) => (
-            format!(" connecting "),
+            " connecting ".to_string(),
             vec![
                 Line::from(format!(" {frame} Connecting to {name}…")),
                 Line::from(Span::styled(" Esc back to list", dim())),
