@@ -34,8 +34,9 @@ case "$OS" in
   Linux)
     case "$ARCH" in
       x86_64 | amd64) ASSET="vibeup-linux-x64" ;;
+      aarch64 | arm64) ASSET="vibeup-linux-arm64" ;;
       *)
-        echo "error: unsupported Linux arch: $ARCH (prebuilts: x86_64 only)" >&2
+        echo "error: unsupported Linux arch: $ARCH (prebuilts: x86_64, aarch64)" >&2
         exit 1
         ;;
     esac
