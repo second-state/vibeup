@@ -41,7 +41,11 @@ enum Cmd {
         demo: bool,
     },
     /// Show installed versions vs latest versions
-    Status,
+    Status {
+        /// Output machine-readable JSON (for scripts and the omarchy widget)
+        #[arg(long)]
+        json: bool,
+    },
     /// Install a package; TAG defaults to latest stable, e.g. v0.4.3-rc.1
     Install { name: String, tag: Option<String> },
     /// Update to latest version (all packages by default)
@@ -148,7 +152,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Tui { demo: false }) {
         Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
-        Cmd::Status => status::run(&cli.dir),
+        Cmd::Status { json } => status::run(&cli.dir, json),
         Cmd::Install { name, tag } => {
             let p = pkg::find(&name)?;
             let log = install::install(
