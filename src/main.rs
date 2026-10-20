@@ -87,9 +87,9 @@ enum Cmd {
     },
     /// Install a package; TAG defaults to latest stable, e.g. v0.4.3-rc.1
     Install { name: String, tag: Option<String> },
-    /// Update to latest version (all packages by default)
+    /// Update to latest version (all packages by default, or vibeup itself with `self`)
     Update {
-        /// Only update this package
+        /// Only update this package; `self` = vibeup itself
         name: Option<String>,
         /// Update to latest prerelease
         #[arg(long)]
@@ -288,6 +288,7 @@ fn run_config(cmd: ConfigCmd) -> Result<()> {
 fn update(name: Option<&str>, pre: bool, dir: &Option<PathBuf>, dry_run: bool) -> Result<()> {
     let dir = pkg::install_dir(dir.as_deref());
     let targets: Vec<&'static pkg::Pkg> = match name {
+        Some(n) if n == "self" => vec![&pkg::SELF],
         Some(n) => vec![pkg::find(n)?],
         None => pkg::PKGS.iter().collect(),
     };
