@@ -329,11 +329,28 @@ pub async fn read_char(p: &Peripheral, char_uuid: uuid::Uuid) -> Result<Vec<u8>>
     bail!("characteristic {char_uuid} not found")
 }
 
-/// 读 CONFIG 全量快照并解析成 JSON Value。
+/// 读 KEYMAP_CONFIG_ID(键名 → 绑定对象的扁平 JSON,与写入格式一致)。
+/// 固件初值可能为空字节(开机从 NVS 刷新前),按空对象处理。
+pub async fn read_keymap(p: &Peripheral) -> Result<serde_json::Value> {
+    let data = read_char(p, KEYMAP_CONFIG_ID).await?;
+    let s = String::from_utf8_lossy(&data);
+    if s.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&s).map_err(|e| anyhow!("device returned invalid keymap JSON: {e}"))
+}
+
+/// 读 CONFIG 全量快照并解析成 JSON Value。keymap 固件单独放在
+/// KEYMAP_CONFIG_ID,这里读回来合并进 `keymap` 字段;没有该特征
+/// (watch / wifi 模式 / 旧固件)就保持 CONFIG 原样,不影响别的字段。
 pub async fn read_config(p: &Peripheral) -> Result<serde_json::Value> {
     let data = read_char(p, CONFIG_ID).await?;
-    serde_json::from_str(&String::from_utf8_lossy(&data))
-        .map_err(|e| anyhow!("device returned invalid config JSON: {e}"))
+    let mut cfg: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&data))
+        .map_err(|e| anyhow!("device returned invalid config JSON: {e}"))?;
+    if let Ok(km) = read_keymap(p).await {
+        cfg["keymap"] = km;
+    }
+    Ok(cfg)
 }
 
 /// 写一个 CONFIG 字段 patch。
@@ -545,7 +562,14 @@ async fn serve_cmd(
             let _ = reply.send(write_config_field(p, &field, value).await);
         }
         SessionCmd::KeymapWrite { payload, reply } => {
-            let _ = reply.send(write_char(p, KEYMAP_CONFIG_ID, payload.as_bytes()).await);
+            let res = write_char(p, KEYMAP_CONFIG_ID, payload.as_bytes()).await;
+            // 固件 on_write 只把 KeymapConfig 投进主循环队列,NVS 保存和读缓存
+            // 刷新在主循环里完成;立刻回读会撞上旧缓存。等一拍再回复,
+            // 紧随其后的 ConfigRead 就能读到新值。
+            if res.is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            let _ = reply.send(res);
         }
         SessionCmd::Reset { reply } => {
             let _ = reply.send(reset_device(p).await);
