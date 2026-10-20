@@ -32,6 +32,45 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
+/// `config keymap` 的绑定语法速查,附在该子命令 --help 的尾部。
+const KEYMAP_BINDING_HELP: &str = r#"
+Binding forms:
+  "text"    text macro — typed verbatim when the key is pressed
+            (escapes: \n \r \t \\ \" \0 \xHH), e.g. '"/compact\n"'
+  A, 5      single uppercase letter or digit
+  name      one of the key names below, e.g. delete, esc, f5
+  Mod+Key   key combo, e.g. Ctrl+C, Alt+Delete, Ctrl+Shift+T
+            modifiers: ctrl alt shift option win cmd gui meta
+
+Key names (case-insensitive):
+  enter, return              Enter
+  space                      Space
+  tab                        Tab
+  escape, esc                Escape
+  backspace                  Backspace
+  delete                     Delete
+  insert                     Insert
+  home, end                  Home / End
+  pageup, pagedown           Page Up / Page Down
+  up, down, left, right      Arrow keys
+  f1 .. f12                  Function keys
+  minus                      -
+  equal, plus                = (base key of =/+; for a literal + use Shift+Equal)
+  semicolon, quote           ; '
+  backquote, backslash       ` \
+  comma, period, slash       , . /
+  bracketleft, bracketright  [ ]
+  ctrl, shift, alt, gui, meta, win, cmd
+                             modifier keys pressed alone
+
+Physical keys: MIC CUSTOM ESC NEXT BACKSPACE SWITCH ACCEPT ROTATE
+
+Examples:
+  vibeup config keymap vibekeys CUSTOM delete       # CUSTOM acts as Delete
+  vibeup config keymap vibekeys MIC Ctrl+X          # MIC sends Ctrl+X
+  vibeup config keymap vibekeys ESC '"/compact\n"'  # ESC types /compact + Enter
+"#;
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Open the TUI dashboard
@@ -121,11 +160,12 @@ enum ConfigCmd {
     /// Bind a Tailscale auth key (device jumps to its Tailscale page after write)
     Tailscale { device: String, auth_key: String },
     /// Key remapping (vibekeys only; same syntax as `vibekeys keymap`)
+    #[command(after_help = KEYMAP_BINDING_HELP)]
     Keymap {
         device: String,
-        /// Key name: MIC CUSTOM ESC NEXT BACKSPACE SWITCH(YOLO) ACCEPT ROTATE
+        /// Physical key: MIC CUSTOM ESC NEXT BACKSPACE SWITCH(YOLO) ACCEPT ROTATE
         key: String,
-        /// Binding: quoted string = text macro ("/compact\\n"); single char, key name, or Ctrl+X = combo
+        /// Binding: quoted text macro, single letter/digit, key name, or Mod+Key combo (see below)
         binding: String,
     },
     /// Reboot the device (to apply stored configuration)

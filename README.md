@@ -91,6 +91,37 @@ vibeup config reset watch                   # reboot the device to apply config
 
 Many subcommands accept `--reset` to reboot the device after writing so the new config takes effect immediately.
 
+#### Keymap binding syntax
+
+`config keymap` rebinds one of the keyboard's physical keys — `MIC`, `CUSTOM`, `ESC`, `NEXT`, `BACKSPACE`, `SWITCH`, `ACCEPT`, `ROTATE` — to a new action. The binding argument takes one of these forms:
+
+| Form | Meaning | Example |
+|---|---|---|
+| `"text"` | Text macro — typed verbatim when the key is pressed; escapes: `\n` `\r` `\t` `\\` `\"` `\0` `\xHH` | `'"/compact\n"'` types `/compact` then Enter |
+| `A`, `5` | Single uppercase letter or digit | `Y` |
+| key name | Any name from the table below | `delete`, `esc`, `f5` |
+| `Mod+Key` | Key combo; modifiers: `ctrl` `alt` `shift` `option` `win` `cmd` `gui` `meta` | `Ctrl+C`, `Alt+Delete` |
+
+Special key names (case-insensitive):
+
+| Names | Key | Names | Key |
+|---|---|---|---|
+| `enter`, `return` | Enter | `space` | Space |
+| `tab` | Tab | `escape`, `esc` | Escape |
+| `backspace` | Backspace | `delete` | Delete |
+| `insert` | Insert | `home`, `end` | Home / End |
+| `pageup`, `pagedown` | Page Up / Page Down | `up`, `down`, `left`, `right` | Arrow keys |
+| `f1` … `f12` | Function keys | `minus` | `-` |
+| `equal`, `plus` | `=` key (for a literal `+` use `Shift+Equal`) | `semicolon`, `quote` | `;` `'` |
+| `backquote`, `backslash` | `` ` `` `\` | `comma`, `period`, `slash` | `,` `.` `/` |
+| `bracketleft`, `bracketright` | `[ ]` | `ctrl`, `shift`, `alt`, `gui`, `meta`, `win`, `cmd` | modifier keys pressed alone |
+
+```sh
+vibeup config keymap vibekeys CUSTOM delete       # CUSTOM acts as Delete
+vibeup config keymap vibekeys MIC Ctrl+X          # MIC sends Ctrl+X
+vibeup config keymap vibekeys ESC '"/compact\n"'  # ESC types /compact + Enter
+```
+
 ### TUI
 
 ```sh
