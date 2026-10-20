@@ -34,7 +34,33 @@ async fn read_and_print(p: &Peripheral) -> Result<()> {
     Ok(())
 }
 
-pub fn wifi(target: Target, action: WifiAction, reset: bool) -> Result<()> {
+pub fn wifi(target: Target, action: WifiAction, reset: bool, dry: bool) -> Result<()> {
+    // dry-run:不连设备,只报意图;Set 的 JSON 校验照做(离线可查)。
+    match &action {
+        WifiAction::Add { ssid, .. } if dry => {
+            println!("would add wifi `{}' to the list{}", ssid, reboot_note(reset));
+            return Ok(());
+        }
+        WifiAction::Remove { ssid } if dry => {
+            println!("would remove wifi `{}'{}", ssid, reboot_note(reset));
+            return Ok(());
+        }
+        WifiAction::Set { json } if dry => {
+            let parsed: serde_json::Value = serde_json::from_str(json)
+                .map_err(|e| anyhow::anyhow!("invalid wifi_list JSON: {e}"))?;
+            let arr = parsed
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("expected a JSON array of {{ssid, pass}}"))?;
+            let clean = ble::sanitize_wifi_list(arr);
+            println!(
+                "would write wifi_list: {}{}",
+                serde_json::to_string(&serde_json::Value::Array(clean))?,
+                reboot_note(reset)
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
     ble::with_target(target, |p| async move {
         match action {
             WifiAction::Show => {
@@ -106,7 +132,11 @@ pub enum WifiAction {
     Set { json: String },
 }
 
-pub fn server_url(target: Target, url: String, reset: bool) -> Result<()> {
+pub fn server_url(target: Target, url: String, reset: bool, dry: bool) -> Result<()> {
+    if dry {
+        println!("would write server_url = {url}{}", reboot_note(reset));
+        return Ok(());
+    }
     ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "server_url", serde_json::Value::String(url.clone())).await?;
         println!("server_url = {url}");
@@ -123,7 +153,7 @@ pub struct AsrOpts {
     pub clean: bool,
 }
 
-pub fn asr(target: Target, opts: AsrOpts, reset: bool) -> Result<()> {
+pub fn asr(target: Target, opts: AsrOpts, reset: bool, dry: bool) -> Result<()> {
     let inner = if opts.clean {
         // 与 vibekeys_app `asr-config --clean` 一致:全空串。
         serde_json::json!({"platform": "whisper", "uri": "", "api_key": "", "model": ""})
@@ -138,6 +168,10 @@ pub fn asr(target: Target, opts: AsrOpts, reset: bool) -> Result<()> {
             "model": opts.model,
         })
     };
+    if dry {
+        println!("would write asr_config = {inner}{}", reboot_note(reset));
+        return Ok(());
+    }
     ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "asr_config", inner).await?;
         println!("asr_config updated");
@@ -146,13 +180,17 @@ pub fn asr(target: Target, opts: AsrOpts, reset: bool) -> Result<()> {
     })
 }
 
-pub fn mic_model(target: Target, mode: String, reset: bool) -> Result<()> {
+pub fn mic_model(target: Target, mode: String, reset: bool, dry: bool) -> Result<()> {
     keys_only(target.kind)?;
     let value: u8 = match mode.to_lowercase().as_str() {
         "ptt" => 0,
         "toggle" => 1,
         other => bail!("invalid mic mode `{other}` — use ptt or toggle"),
     };
+    if dry {
+        println!("would write mic_model = {value}{}", reboot_note(reset));
+        return Ok(());
+    }
     ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "mic_model", serde_json::json!(value)).await?;
         println!("mic_model = {value}");
@@ -161,8 +199,15 @@ pub fn mic_model(target: Target, mode: String, reset: bool) -> Result<()> {
     })
 }
 
-pub fn prefer_asr(target: Target, on: bool, reset: bool) -> Result<()> {
+pub fn prefer_asr(target: Target, on: bool, reset: bool, dry: bool) -> Result<()> {
     keys_only(target.kind)?;
+    if dry {
+        println!(
+            "would write prefer_builtin_asr = {on}{}",
+            reboot_note(reset)
+        );
+        return Ok(());
+    }
     ble::with_target(target, |p| async move {
         ble::write_config_field(&p, "prefer_builtin_asr", serde_json::json!(on)).await?;
         println!("prefer_builtin_asr = {on}");
@@ -171,9 +216,14 @@ pub fn prefer_asr(target: Target, on: bool, reset: bool) -> Result<()> {
     })
 }
 
-pub fn tailscale(target: Target, key: String) -> Result<()> {
+pub fn tailscale(target: Target, key: String, dry: bool) -> Result<()> {
     if key.trim().is_empty() {
         bail!("empty tailscale auth key");
+    }
+    if dry {
+        // 密钥不打明文,报长度即可。
+        println!("would bind a tailscale auth key ({} chars)", key.len());
+        return Ok(());
     }
     ble::with_target(target, |p| async move {
         // 手表上这条写是独占的:固件忽略同包其他字段,并存后立刻跳
@@ -192,9 +242,13 @@ pub fn tailscale(target: Target, key: String) -> Result<()> {
     })
 }
 
-pub fn keymap(target: Target, key: String, binding: String) -> Result<()> {
+pub fn keymap(target: Target, key: String, binding: String, dry: bool) -> Result<()> {
     keys_only(target.kind)?;
     let payload = build_keymap_config(&key, &binding);
+    if dry {
+        println!("would write keymap {payload}");
+        return Ok(());
+    }
     ble::with_target(target, |p| async move {
         ble::write_char(&p, ble::KEYMAP_CONFIG_ID, payload.as_bytes()).await?;
         println!("keymap {key} updated (merged into the device keymap)");
@@ -202,7 +256,11 @@ pub fn keymap(target: Target, key: String, binding: String) -> Result<()> {
     })
 }
 
-pub fn reset(target: Target) -> Result<()> {
+pub fn reset(target: Target, dry: bool) -> Result<()> {
+    if dry {
+        println!("would send RESET to {}", target.kind.name());
+        return Ok(());
+    }
     let kind = target.kind;
     ble::with_target(target, |p| async move {
         ble::reset_device(&p).await?;
@@ -219,6 +277,11 @@ async fn maybe_reset(p: &Peripheral, reset: bool) -> Result<()> {
         println!("note: stored; reboot the device (`vibeup config reset`) to apply");
     }
     Ok(())
+}
+
+/// dry-run 输出用的尾巴:标注"还会重启设备"。
+fn reboot_note(reset: bool) -> &'static str {
+    if reset { " (+ reboot)" } else { "" }
 }
 
 // ===== 键位 binding 解析(移植自 vibekeys_app)=====

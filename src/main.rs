@@ -22,7 +22,7 @@ use std::path::PathBuf;
     about = "Install and update the vibe family host tools from GitHub Releases"
 )]
 struct Cli {
-    /// Print what would be done without actually downloading or writing to disk
+    /// Print what would be done without actually downloading, writing to disk, or writing to devices
     #[arg(long, global = true)]
     dry_run: bool,
     /// Install directory (default: ~/.cargo/bin, matching each repo's install.sh)
@@ -214,11 +214,11 @@ fn main() -> Result<()> {
             print!("{log}");
             Ok(())
         }
-        Cmd::Config { cmd } => run_config(cmd),
+        Cmd::Config { cmd } => run_config(cmd, cli.dry_run),
     }
 }
 
-fn run_config(cmd: ConfigCmd) -> Result<()> {
+fn run_config(cmd: ConfigCmd, dry_run: bool) -> Result<()> {
     use config_cmd::{AsrOpts, WifiAction};
     // CLI direct connect: no specific device, connect to first of the scanned kind.
     let parse_device = |s: &str| -> Result<ble::Target> {
@@ -234,10 +234,10 @@ fn run_config(cmd: ConfigCmd) -> Result<()> {
                 WifiCmd::Remove { ssid } => WifiAction::Remove { ssid },
                 WifiCmd::Set { json } => WifiAction::Set { json },
             };
-            config_cmd::wifi(kind, action, false)
+            config_cmd::wifi(kind, action, false, dry_run)
         }
         ConfigCmd::ServerUrl { device, url, reset } => {
-            config_cmd::server_url(parse_device(&device)?, url, reset)
+            config_cmd::server_url(parse_device(&device)?, url, reset, dry_run)
         }
         ConfigCmd::Asr {
             device,
@@ -255,12 +255,13 @@ fn run_config(cmd: ConfigCmd) -> Result<()> {
                 clean,
             },
             reset,
+            dry_run,
         ),
         ConfigCmd::MicModel {
             device,
             mode,
             reset,
-        } => config_cmd::mic_model(parse_device(&device)?, mode, reset),
+        } => config_cmd::mic_model(parse_device(&device)?, mode, reset, dry_run),
         ConfigCmd::PreferAsr {
             device,
             value,
@@ -271,17 +272,17 @@ fn run_config(cmd: ConfigCmd) -> Result<()> {
                 "off" | "false" => false,
                 other => anyhow::bail!("invalid value `{other}` — use on or off"),
             };
-            config_cmd::prefer_asr(parse_device(&device)?, on, reset)
+            config_cmd::prefer_asr(parse_device(&device)?, on, reset, dry_run)
         }
         ConfigCmd::Tailscale { device, auth_key } => {
-            config_cmd::tailscale(parse_device(&device)?, auth_key)
+            config_cmd::tailscale(parse_device(&device)?, auth_key, dry_run)
         }
         ConfigCmd::Keymap {
             device,
             key,
             binding,
-        } => config_cmd::keymap(parse_device(&device)?, key, binding),
-        ConfigCmd::Reset { device } => config_cmd::reset(parse_device(&device)?),
+        } => config_cmd::keymap(parse_device(&device)?, key, binding, dry_run),
+        ConfigCmd::Reset { device } => config_cmd::reset(parse_device(&device)?, dry_run),
     }
 }
 
