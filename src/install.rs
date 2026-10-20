@@ -267,7 +267,7 @@ fn note_path(dir: &Path, out: &mut String) {
 }
 
 /// 卸载:删入口 + 全部版本化文件。文件不存在不报错。返回过程日志。
-pub fn uninstall(pkg: &Pkg, dir: &Path) -> Result<String> {
+pub fn uninstall(pkg: &Pkg, dir: &Path, dry_run: bool) -> Result<String> {
     let mut out = String::new();
     let mut removed = 0;
     for entry in std::fs::read_dir(dir).into_iter().flatten() {
@@ -282,8 +282,16 @@ pub fn uninstall(pkg: &Pkg, dir: &Path) -> Result<String> {
                 && name[pkg.bin.len() + 1..].starts_with(|c: char| c.is_ascii_digit()));
         if ours {
             let path = entry.path();
-            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-            out.push_str(&format!("Removed: {}\n", path.display()));
+            // dry-run 只报告,不真删;其余语义与实际删除完全一致。
+            if !dry_run {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+            }
+            out.push_str(&format!(
+                "{}: {}\n",
+                if dry_run { "Would remove" } else { "Removed" },
+                path.display()
+            ));
             removed += 1;
         }
     }

@@ -239,7 +239,7 @@ pub fn uninstall_pkg(state: &mut PkgState, dir: &Path, dry_run: bool, idx: usize
         state.message = format!("{}: not installed", pkg.name);
         return;
     }
-    let res = install::uninstall(pkg, dir);
+    let res = install::uninstall(pkg, dir, dry_run);
     state.message = format!("{}: {}", pkg.name, describe(&res, dry_run));
     state.entries = fresh_entries(dir);
 }
