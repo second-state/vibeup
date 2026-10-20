@@ -1,7 +1,8 @@
-//! vibeup —— 安装/更新 vibe 家族的主机工具(vibetty、vibekeys,…)。
+//! vibeup — Install and update the vibe family host tools (vibetty, vibekeys, …).
 //!
-//! 从各仓库的 GitHub Releases 下载对应平台的预编译二进制,装成
-//! `<bin>-<版本>` + symlink(与各仓库 install.sh 约定一致)。
+//! Downloads platform-specific prebuilt binaries from GitHub Releases and
+//! installs them as `<bin>-<version>` + symlink (matches each repo's
+//! install.sh convention).
 
 mod ble;
 mod config_cmd;
@@ -21,10 +22,10 @@ use std::path::PathBuf;
     about = "Install and update the vibe family host tools from GitHub Releases"
 )]
 struct Cli {
-    /// 打印将要做的事,不实际下载/写盘
+    /// Print what would be done without actually downloading or writing to disk
     #[arg(long, global = true)]
     dry_run: bool,
-    /// 安装目录(默认 ~/.cargo/bin,与各仓库 install.sh 一致)
+    /// Install directory (default: ~/.cargo/bin, matching each repo's install.sh)
     #[arg(long, global = true, value_name = "PATH")]
     dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -33,56 +34,60 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 查看已装版本与最新版本(无子命令时的默认行为)
-    Status,
-    /// 安装一个包;TAG 缺省 = 最新稳定版,也可指定如 v0.4.3-rc.1
+    /// Open the TUI dashboard
+    Tui {
+        /// Use fake device data (for demo/development without hardware)
+        #[arg(long)]
+        demo: bool,
+    },
+    /// Show installed versions vs latest versions
+    Status {
+        /// Output machine-readable JSON (for scripts and the omarchy widget)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a package; TAG defaults to latest stable, e.g. v0.4.3-rc.1
     Install { name: String, tag: Option<String> },
-    /// 更新到最新版(缺省全部包)
+    /// Update to latest version (all packages by default)
     Update {
-        /// 只更新这一个包
+        /// Only update this package
         name: Option<String>,
-        /// 更新到最新 prerelease
+        /// Update to latest prerelease
         #[arg(long)]
         pre: bool,
     },
-    /// 卸载一个包(删入口和全部版本化文件)
+    /// Uninstall a package (removes entry point and all versioned files)
     Uninstall { name: String },
-    /// 通过 BLE 配置设备(VibeKeys 键盘 / VibeWatch 手表)
+    /// Configure devices over BLE (VibeKeys keyboard / VibeWatch)
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
-    },
-    /// 打开 TUI 面板
-    Tui {
-        /// 设备标签用假数据(无真机时演示/开发用)
-        #[arg(long)]
-        demo: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// 打印设备的 CONFIG 快照
+    /// Print the device's CONFIG snapshot
     Show {
-        /// 目标设备:vibekeys | watch
+        /// Target device: vibekeys | watch
         #[arg(value_parser = clap::value_parser!(String))]
         device: String,
     },
-    /// 查看 / 修改 WiFi 列表(顺序 = 连接优先级,最多 8 条)
+    /// View / modify the WiFi list (order = connection priority, max 8 entries)
     Wifi {
         device: String,
         #[command(subcommand)]
         cmd: WifiCmd,
     },
-    /// 设置 MQTT broker 地址
+    /// Set the MQTT broker address
     ServerUrl {
         device: String,
         url: String,
-        /// 写完让设备重启生效
+        /// Reboot the device after writing to apply
         #[arg(long)]
         reset: bool,
     },
-    /// 设置 Whisper ASR 服务
+    /// Set the Whisper ASR service
     Asr {
         device: String,
         #[arg(long)]
@@ -91,21 +96,21 @@ enum ConfigCmd {
         api_key: Option<String>,
         #[arg(long)]
         model: Option<String>,
-        /// 清空 ASR 配置
+        /// Clear the ASR configuration
         #[arg(long)]
         clean: bool,
         #[arg(long)]
         reset: bool,
     },
-    /// 设置麦克风模式(仅 vibekeys)
+    /// Set the microphone mode (vibekeys only)
     MicModel {
         device: String,
-        /// ptt = 按住说话,toggle = 点按开始/停止
+        /// ptt = push to talk, toggle = tap to start/stop
         mode: String,
         #[arg(long)]
         reset: bool,
     },
-    /// 键盘模式下是否优先用内置 ASR(仅 vibekeys)
+    /// Prefer built-in ASR in keyboard mode (vibekeys only)
     PreferAsr {
         device: String,
         /// on | off
@@ -113,40 +118,41 @@ enum ConfigCmd {
         #[arg(long)]
         reset: bool,
     },
-    /// 绑定 Tailscale auth key(写完设备自己跳 Tailscale 页)
+    /// Bind a Tailscale auth key (device jumps to its Tailscale page after write)
     Tailscale { device: String, auth_key: String },
-    /// 键位重映射(仅 vibekeys;语法同 `vibekeys keymap`)
+    /// Key remapping (vibekeys only; same syntax as `vibekeys keymap`)
     Keymap {
         device: String,
-        /// 键名:MIC CUSTOM ESC NEXT BACKSPACE SWITCH(YOLO) ACCEPT ROTATE
+        /// Key name: MIC CUSTOM ESC NEXT BACKSPACE SWITCH(YOLO) ACCEPT ROTATE
         key: String,
-        /// 绑定:加引号是文本宏("/compact\\n");单字符或键名或 Ctrl+X 是组合键
+        /// Binding: quoted string = text macro ("/compact\\n"); single char, key name, or Ctrl+X = combo
         binding: String,
     },
-    /// 让设备重启(使已存的配置生效)
+    /// Reboot the device (to apply stored configuration)
     Reset { device: String },
 }
 
 #[derive(Subcommand)]
 enum WifiCmd {
-    /// 打印当前 WiFi 列表
+    /// Print the current WiFi list
     Show,
-    /// 追加(或更新同名 SSID 的)一条
+    /// Append a new entry (or update an existing SSID)
     Add {
         ssid: String,
         #[arg(default_value = "")]
         pass: String,
     },
-    /// 移除一条
+    /// Remove an entry
     Remove { ssid: String },
-    /// 用完整 JSON 数组整体替换([{ssid, pass}, …],自动去空、截断到 8 条)
+    /// Replace the entire list with a JSON array ([{ssid, pass}, …], auto-dedup, capped at 8)
     Set { json: String },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd.unwrap_or(Cmd::Status) {
-        Cmd::Status => status::run(&cli.dir),
+    match cli.cmd.unwrap_or(Cmd::Tui { demo: false }) {
+        Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
+        Cmd::Status { json } => status::run(&cli.dir, json),
         Cmd::Install { name, tag } => {
             let p = pkg::find(&name)?;
             let log = install::install(
@@ -163,19 +169,18 @@ fn main() -> Result<()> {
         }
         Cmd::Update { name, pre } => update(name.as_deref(), pre, &cli.dir, cli.dry_run),
         Cmd::Uninstall { name } => {
-            let p = pkg::find(&name)?;
+            let p = if name == "self" { &pkg::SELF } else { pkg::find(&name)? };
             let log = install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()))?;
             print!("{log}");
             Ok(())
         }
         Cmd::Config { cmd } => run_config(cmd),
-        Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
     }
 }
 
 fn run_config(cmd: ConfigCmd) -> Result<()> {
     use config_cmd::{AsrOpts, WifiAction};
-    // CLI 直连:不指定具体设备,连该类型扫到的第一台。
+    // CLI direct connect: no specific device, connect to first of the scanned kind.
     let parse_device = |s: &str| -> Result<ble::Target> {
         Ok(ble::Target::auto(ble::DeviceKind::parse(s)?))
     };

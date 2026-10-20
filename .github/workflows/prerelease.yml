@@ -22,6 +22,13 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact: vibeup-linux-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            artifact: vibeup-linux-arm64
+            # musl 静态链接下没有 glibc 的 libatomic;GCC 默认 outline-atomics
+            # 会生成对 __aarch64_ldadd4_sync 等 libatomic 符号的调用导致链接失败,
+            # 关掉它让原子操作内联(vendored libdbus 的 C 代码需要)。
+            cflags: -mno-outline-atomics
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: vibeup-macos-arm64
@@ -36,14 +43,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何 x86_64 Linux 都能跑。
-      # ring(rustls 加密后端)含 C 代码,musl 下需要 musl-gcc。
+      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何同架构 Linux 都能跑。
+      # aarch64 直接用 GitHub 原生 arm runner(ubuntu-24.04-arm)免交叉编译。
+      # ring(rustls 加密后端)含 C 代码,musl 下需要 musl-gcc(装 musl-tools,
+      # 在 arm runner 上它就是 aarch64 版,与 x86_64 路径完全对称)。
       # libdbus(btleplug → bluez)由 Cargo.toml 的 musl target 段 vendored 编译。
       - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
+        env:
+          CFLAGS_aarch64_unknown_linux_musl: ${{ matrix.cflags }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename artifact

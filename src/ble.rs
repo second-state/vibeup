@@ -23,8 +23,9 @@ pub const RESET_ID: uuid::Uuid = uuid::Uuid::from_u128(0xf0e1d2c3_b4a5_6789_0abc
 /// wifi_list 最多条数,与固件 `MAX_WIFI_CREDS` 一致。
 pub const MAX_WIFI_CREDS: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DeviceKind {
+    #[default]
     VibeKeys,
     Watch,
 }
@@ -241,21 +242,6 @@ async fn find_peripheral(adapter: &Adapter, id: &str) -> Result<Peripheral> {
     bail!("device {id} disappeared right after the scan")
 }
 
-/// 扫描并列出全部匹配设备(不动连接)。TUI 的设备选择列表用。
-pub fn scan_devices(kind: DeviceKind) -> Result<Vec<FoundDevice>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let adapter = get_adapter().await?;
-        let (found, seen) = collect_scan(&adapter, kind, false).await?;
-        if found.is_empty() {
-            return Err(no_device_error(kind, &seen));
-        }
-        Ok(found)
-    })
-}
-
 /// 按广播名前缀挑第一台(旧行为,CLI 直连)。
 async fn scan_and_find(adapter: &Adapter, kind: DeviceKind) -> Result<Peripheral> {
     let (found, seen) = collect_scan(adapter, kind, true).await?;
@@ -433,15 +419,20 @@ impl Session {
     }
 
     /// 发一条命令等回复。会话已关(线程退出)时报错。
+    /// 用 `try_send` + `recv_timeout` 而非 `blocking_send` + `recv`:
+    /// UI 事件 handler 跑在 tokio runtime 线程上,`blocking_send` 在那里
+    /// 会 panic("cannot block from within a runtime"),`recv` 也会阻塞
+    /// worker;`try_send` 非阻塞、`recv_timeout` 有界,ms 级往返完全够用。
     fn call<T>(
         &self,
         make: impl FnOnce(std::sync::mpsc::Sender<Result<T>>) -> SessionCmd,
     ) -> Result<T> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.cmd_tx
-            .blocking_send(make(tx))
+            .try_send(make(tx))
             .map_err(|_| anyhow!("device session is closed"))?;
-        rx.recv().map_err(|_| anyhow!("device session is closed"))?
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| anyhow!("device session is closed"))?
     }
 
     pub fn read_config(&self) -> Result<serde_json::Value> {
