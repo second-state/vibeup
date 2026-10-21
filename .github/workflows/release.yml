@@ -81,6 +81,17 @@ jobs:
         with:
           path: artifacts
 
+      # 每个产物配一个 .sha256sum(sha256sum -c 可直接校验)。
+      # download-artifact 把每个产物放在自己的子目录里,awk 去掉路径只留文件名。
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          for f in */*; do
+            sha256sum "$f" \
+              | awk '{n = $2; sub(/.*\//, "", n); print $1 "  " n}' > "$f.sha256sum"
+          done
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
