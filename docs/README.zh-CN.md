@@ -13,19 +13,11 @@
 
 ## 安装
 
-从源码构建(需要 Rust 1.85+ / edition 2024):
-
 ```sh
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/second-state/vibeup/main/install.sh | bash
 ```
 
-或构建 Linux 静态二进制:
-
-```sh
-cargo build --release
-```
-
-支持的主机平台:`linux-x64`、`macos-arm64`、`windows-x64`。
+或从[最新 release](https://github.com/second-state/vibeup/releases/latest)下载对应平台的二进制 —— `vibeup-linux-x64`、`vibeup-linux-arm64`、`vibeup-macos-arm64`、`vibeup-windows-x64.exe`(各带一个 `.sha256sum` 校验文件)—— 放进 `PATH` 即可。已装过的直接 `vibeup update self` 自更新。
 
 ## 使用
 
@@ -44,6 +36,7 @@ vibeup install vibetty              # 最新稳定版
 vibeup install vibekeys v0.4.3-rc.1 # 指定 tag
 vibeup update                       # 更新全部包
 vibeup update vibetty --pre         # 更新单个包到最新 prerelease
+vibeup update self                  # 更新 vibeup 自己
 vibeup uninstall vibekeys
 ```
 

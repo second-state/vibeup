@@ -13,19 +13,11 @@ A built-in TUI ties both together in one panel.
 
 ## Install
 
-Build from source (Rust 1.85+ / edition 2024):
-
 ```sh
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/second-state/vibeup/main/install.sh | bash
 ```
 
-or build a static Linux binary:
-
-```sh
-cargo build --release
-```
-
-Supported host platforms: `linux-x64`, `macos-arm64`, `windows-x64`.
+or grab a prebuilt binary from the [latest release](https://github.com/second-state/vibeup/releases/latest) — `vibeup-linux-x64`, `vibeup-linux-arm64`, `vibeup-macos-arm64`, `vibeup-windows-x64.exe` (each has a companion `.sha256sum`) — and put it on your `PATH`. Already installed? `vibeup update self` upgrades vibeup itself.
 
 ## Usage
 
@@ -44,6 +36,7 @@ vibeup install vibetty              # latest stable release
 vibeup install vibekeys v0.4.3-rc.1 # pin a specific tag
 vibeup update                       # update everything
 vibeup update vibetty --pre         # update one package to the latest prerelease
+vibeup update self                  # update vibeup itself
 vibeup uninstall vibekeys
 ```
 
@@ -135,36 +128,3 @@ Three tabs, switched with `Tab` or `1`/`2`/`3`:
 - **Packages** — install, update, and uninstall vibetty / vibekeys.
 
 Actions that need the terminal (scanning, installing) temporarily suspend the TUI and return when done.
-
-## Adding a new package
-
-Add one entry to the registry in [`src/pkg.rs`](src/pkg.rs) — the only requirement is that the release asset is named `<bin>-<platform>` (e.g. `vibetty-linux-x64`):
-
-```rust
-Pkg { name: "mytool", repo: "second-state/mytool", bin: "mytool" },
-```
-
-## Project layout
-
-```
-src/
-├── main.rs         CLI definition (clap)
-├── pkg.rs          package registry, platform assets, installed/release lookup
-├── install.rs      download → verify → atomic install → symlink switching
-├── status.rs       `vibeup status`
-├── ble.rs          BLE central: scan/connect/read/write the CONFIG characteristic
-├── config_cmd.rs   `vibeup config …`
-└── tui/            the TUI, layered React-style:
-    ├── app.rs      state + event loop + key dispatch
-    ├── element.rs  virtual element tree + generic renderer
-    ├── view.rs     UI components: pure (state, props) -> Element
-    ├── device.rs   device-tab state machine, resident BLE session
-    ├── fields.rs   row model: fields / actions / popups
-    ├── input.rs    single-line input with cursor support
-    ├── demo.rs     fake data for --demo mode
-    └── pkgs.rs     package-tab entries
-```
-
-The BLE protocol is ported from [vibekeys_app](https://github.com/second-state/vibekeys_app): both devices expose a CONFIG characteristic (READ = full snapshot, WRITE = JSON partial patch) plus a KEYMAP characteristic for key remapping and a RESET characteristic (write ASCII `RESET` to reboot).
-
-Static musl builds compile a vendored `libdbus` from source (the BlueZ backend used by btleplug); glibc builds are unaffected.
