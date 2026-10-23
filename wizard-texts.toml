@@ -1,0 +1,221 @@
+# vibeup wizard 文案表
+# ─────────────────────────────────────────────────────────────
+# 改完这个文件告诉 Claude,会把文案写回 src/tui/wizard.rs。
+#
+# 占位符说明(花括号里的部分是运行时填的,别删):
+#   {name}     设备名( vibekeys / watch )
+#   {spinner}  转圈动画字符
+#   {binding}  捕捉到的快捷键,如 Ctrl+A
+#   {label}    plugin 名( Claude Code / Codex )
+#   {cli}      命令行工具名( claude / codex )
+#   {action}   codex 用 add,claude 用 install
+#   {url}      broker / API 地址
+#   {e}        错误详情
+#
+# 注意:英文文案里的破折号 — 和间隔号 · 是排版的一部分,建议保留。
+
+# ── 通用 ─────────────────────────────────────────────────────
+[common]
+type_here = "(type here)"                # 输入框空时的占位提示
+working = "working…"                     # 后台任务时的底部提示
+
+# ── 步骤 1:欢迎 / 是否配置键盘 ──────────────────────────────
+[welcome]
+title = "vibeup wizard"
+text = [
+    "Welcome! This wizard installs the vibe tools",
+    "and configures your device over Bluetooth.",
+]
+option_yes = "Yes — set up my VibeKeys keyboard"
+option_no = "No"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+
+# ── 步骤 2/19:扫描连接(键盘和手表共用)──────────────────────
+[scan]
+title = "wizard — set up {name}"
+scanning = "{spinner} scanning for {name}…"
+# 键盘版提示(键盘有 ACCEPT 键可以重新广播)
+not_found_keyboard = "not found? press ACCEPT on the keyboard, then wait"
+# 手表版提示
+not_found_other = "not found? put the device in provisioning mode, then wait"
+found = "found:"
+pick_hint = "↑↓ choose · Enter connect · Esc quit"
+no_devices = "no devices found — press ACCEPT on the device, then Enter"
+
+[connecting]
+title = "wizard — connecting"
+text = "{spinner} connecting to {name}…"
+hint = "this can take a few seconds · Esc quit"
+
+[scan_failed]
+# {e} 前缀是具体错误;下面两个是固定后缀
+rescan_suffix = "— Enter to scan again"
+connect_failed = "connect failed: {e} — Enter to scan again"
+disconnected = "device disconnected: {e}"
+
+# ── 步骤 3:输入方式 ──────────────────────────────────────────
+[input_method]
+title = "wizard — input method"
+text = "How do you type with the keyboard?"
+option_local = "Local input (typeless-like) — uses your IME"
+option_api = "Whisper-compatible API — keyboard does ASR"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+
+# ── 步骤 4:捕捉输入法快捷键 ─────────────────────────────────
+[hotkey]
+title = "wizard — input method hotkey"
+text = "What is your IME hotkey?"
+placeholder = "…press a key combo"
+hint_before = "e.g. Ctrl+Space — press it now · Esc quit"
+hint_after = "Enter confirm · any other key re-capture · Esc quit"
+# 写入成功后的总结行
+log_mic = "keyboard MIC = {binding}"
+log_prefer_off = "prefer_builtin_asr = off"
+
+# ── 步骤 5:whisper API ──────────────────────────────────────
+[asr]
+title = "wizard — whisper API"
+text = "Enter your whisper-compatible ASR endpoint."
+field_url = "url"
+field_api_key = "api-key"
+hint = "Tab switch field · Enter save · Esc quit"
+error_url_required = "whisper API url is required"
+log_asr = "asr_config = {url}"
+log_prefer_on = "prefer_builtin_asr = on"
+
+# ── 步骤 6:装 vibekeys 包 ───────────────────────────────────
+[vibekeys_app]
+title = "wizard — agent monitoring"
+text = "Install vibekeys-app?"
+subtext = "It monitors Claude Code / Codex work status on the keyboard."
+option_yes = "Yes — install vibekeys + agent plugin"
+option_no = "Skip"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+busy = "installing vibekeys"
+log_installed = "installed vibekeys"
+log_skipped = "skipped vibekeys"
+
+# ── 步骤 6a/6b:plugin 询问(分开问)─────────────────────────
+[plugin]
+# {label} = Claude Code / Codex
+title = "wizard — {label} plugin"
+text = "Install the {label} plugin?"
+subtext = "It shows agent work status on the keyboard."
+# 要执行的命令(会显示在操作框里;{cli}/{action} 运行时填)
+command_1 = "  $ {cli} plugin marketplace add second-state/marketplace"
+command_2 = "  $ {cli} plugin {action} vibekeys@second-state-tools"
+option_yes = "Yes — run the commands"
+option_no = "Skip"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+busy = "installing {label} plugin"
+log_installed = "{label} plugin installed"
+log_skipped = "{label} plugin skipped"
+# {cli} {action} 会填进失败提示
+log_failed = "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
+
+# ── 步骤 8/20:装 vibetty ────────────────────────────────────
+[vibetty]
+title = "wizard — vibetty"
+text = "Install vibetty (remote control for your agent)?"
+option_yes = "Yes — install vibetty"
+# 键盘路径的"否";手表路径显示 skip_watch
+option_no = "Skip — no remote control"
+option_no_watch = "Skip (continue anyway)"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+busy = "installing vibetty"
+log_installed = "installed vibetty"
+
+# ── 步骤 10:局域网外用 remote?──────────────────────────────
+[remote]
+title = "wizard — remote mode"
+text = "Will you use remote mode outside the LAN?"
+option_yes = "Yes — outside LAN"
+option_no = "No — LAN only"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+error_no_lan_ip = "could not detect the LAN IP — is the machine online?"
+
+# ── 步骤 11:有 tailscale 账号?──────────────────────────────
+[tailscale_ask]
+title = "wizard — tailscale"
+text = "Do you have a Tailscale account?"
+option_yes = "Yes"
+option_no = "No — help me choose"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+
+# ── 步骤 11b:三选一 ─────────────────────────────────────────
+[broker_choice]
+title = "wizard — broker"
+text = "Pick a way to reach your machine from outside:"
+subtext = "EMQX Cloud is free up to 1 GB/month."
+option_tailscale = "Sign up for Tailscale (free, private network)"
+option_emqx = "Use EMQX Cloud"
+option_self = "I have my own broker (self-hosted)"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+
+# ── 步骤 12:tailscale auth-key ──────────────────────────────
+# 文案来源:vibewatch_firmware/README.md "Configuring Tailscale":
+# 一次性 key 即可 —— 首次注册后设备缓存自己的 node keys,随时可换绑;
+# 写入后设备自动切到 Tailscale 页面。
+[tailscale_key]
+title = "wizard — tailscale auth key"
+text = [
+    "1. In the Tailscale console go to Settings → Keys:",
+    "   https://login.tailscale.com/admin/settings/keys",
+    "2. Click \"Generate auth key…\" to create a one-off key",
+    "   (tskey-auth-…). One-off is enough — the device",
+    "   caches its own node keys.",
+    "3. Paste the key below:",
+]
+field = "auth-key"
+hint = "Enter send to device · Esc quit"
+error_empty = "paste the auth key first"
+log_written = "tailscale auth key written to device"
+
+# ── 步骤 13:本机 tailscale ip ───────────────────────────────
+[tailscale_ip]
+title = "wizard — tailscale on this machine"
+text_1 = "No tailscale IP found on this machine."
+text_2 = "Install tailscale and run `tailscale up`, then:"
+hint = "Enter/r retry · e enter broker manually · Esc quit"
+
+# ── 步骤 15:手输 broker 地址 ────────────────────────────────
+[broker_input]
+title = "wizard — broker address"
+# emqx 路径的两行说明
+text_emqx_1 = "Sign up at https://www.emqx.com/en/cloud"
+text_emqx_2 = "(free 1 GB/month), then paste the broker URL:"
+# 自建路径
+text_self = "Enter your broker's address:"
+field = "broker"
+hint = "Enter confirm · Esc quit"
+error_invalid = "not a valid broker URL — mqtt:// mqtts:// ws:// or wss:// with a host"
+
+# ── 其他错误/杂项 ───────────────────────────────────────────
+[errors]
+# 写 vibetty config.toml 失败时
+vibetty_config = "vibetty config: {e}"
+# 设备不在配网模式(这句在 src/ble.rs,CLI config 也共用,改这里会一起变)
+no_provisioning = "no {name} in provisioning mode — put it there first (Setting → Enable BLE)"
+
+# ── 完成页 ──────────────────────────────────────────────────
+[done]
+title = "wizard — done"
+empty = "nothing configured yet."
+# 日志行前缀(后面跟具体内容)
+checkmark = "✓"
+option_continue = "Continue"
+hint = "Enter continue"
+# 各步骤写进总结的行
+log_connected = "connected to {name}"
+log_server_url = "{device} server_url = {url}"
+log_server_url_from_config = "server_url = {url} (from vibetty config)"
+log_vibetty_broker = "vibetty broker = {url}"
+log_vibetty_broker_demo = "vibetty broker = {url} (demo)"
+
+# ── 手表询问页 ──────────────────────────────────────────────
+[watch_ask]
+title = "wizard — watch"
+text = "Keyboard setup is complete. Configure the VibeWatch next?"
+option_yes = "Yes — configure the VibeWatch"
+option_no = "No — finish"
+hint = "↑↓ choose · Enter confirm · Esc quit"

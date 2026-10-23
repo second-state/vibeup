@@ -149,7 +149,7 @@ async fn collect_scan(
 }
 
 /// 后台线程体:真实扫描(自带 runtime)。
-fn scan_devices_thread(kind: DeviceKind) -> anyhow::Result<Vec<FoundDevice>> {
+pub(crate) fn scan_devices_thread(kind: DeviceKind) -> anyhow::Result<Vec<FoundDevice>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

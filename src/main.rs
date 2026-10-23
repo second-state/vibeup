@@ -79,6 +79,12 @@ enum Cmd {
         #[arg(long)]
         demo: bool,
     },
+    /// Guided setup: step-by-step install + device configuration
+    Wizard {
+        /// Use fake device data (for demo/development without hardware)
+        #[arg(long)]
+        demo: bool,
+    },
     /// Show installed versions vs latest versions
     Status {
         /// Output machine-readable JSON (for scripts and the omarchy widget)
@@ -191,7 +197,8 @@ enum WifiCmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Tui { demo: false }) {
-        Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo),
+        Cmd::Tui { demo } => tui::run(cli.dir, cli.dry_run, demo, false),
+        Cmd::Wizard { demo } => tui::run(cli.dir, cli.dry_run, demo, true),
         Cmd::Status { json } => status::run(&cli.dir, json),
         Cmd::Install { name, tag } => {
             let p = pkg::find(&name)?;
@@ -289,7 +296,7 @@ fn run_config(cmd: ConfigCmd, dry_run: bool) -> Result<()> {
 fn update(name: Option<&str>, pre: bool, dir: &Option<PathBuf>, dry_run: bool) -> Result<()> {
     let dir = pkg::install_dir(dir.as_deref());
     let targets: Vec<&'static pkg::Pkg> = match name {
-        Some(n) if n == "self" => vec![&pkg::SELF],
+        Some("self") => vec![&pkg::SELF],
         Some(n) => vec![pkg::find(n)?],
         None => pkg::PKGS.iter().collect(),
     };
