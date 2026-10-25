@@ -129,7 +129,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     let prt_arc = pkg_rt.read().clone();
                     let mut prt = prt_arc.lock().unwrap();
                     let mut ps = pkg.write();
-                    if let Some(m) = actions::poll_pkg_job(&mut ps, &mut prt, dry_run) {
+                    if let Some(m) = actions::poll_pkg_job(&mut ps, &mut prt, &dir, dry_run) {
                         msg = msg.or(Some(m));
                     }
                 }
@@ -678,7 +678,28 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
         });
     }
 
-    let body: AnyElement<'static> = if let Some(m) = &st.menu {
+    let body: AnyElement<'static> = if let Some(ask) = &st.plugin_ask {
+        // plugin 询问窗:勾选要装的 agent plugin。
+        let mut ask_lines: Vec<Line> = vec![Line::from(" Agent plugins to install:")];
+        for (i, (cli, _, label)) in ask.clis.iter().enumerate() {
+            let check = if ask.checked[i] { "[x]" } else { "[ ]" };
+            let sel = if i == ask.sel { "❯" } else { " " };
+            ask_lines.push(Line::from(format!(
+                " {sel} {check} {label} plugin ({cli})"
+            )));
+        }
+        ask_lines.push(Line::from(""));
+        ask_lines.push(Line::from(Span::styled(
+            " ↑↓ select · Space toggle · Enter install · Esc cancel",
+            dim(),
+        )));
+        element!(View(flex_direction: Direction::Vertical) {
+            View(height: Constraint::Fill(1)) {
+                Text(text: Line::from(""))
+            }
+            PackagesMenuModal(title: String::from(" agent plugins "), lines: ask_lines)
+        }).into()
+    } else if let Some(m) = &st.menu {
         let e = st.entries.get(m.pkg);
         let (latest, any, title) = match e {
             Some(e) => (

@@ -576,6 +576,15 @@ pub struct DownloadProgress {
 
 pub type SharedProgress = Arc<Mutex<DownloadProgress>>;
 
+/// plugin 询问窗:检测到的 CLI 勾选列表(装完 vibekeys 后弹)。
+#[derive(Clone, Debug)]
+pub struct PluginAsk {
+    /// (cli, install 子命令, 人读名)
+    pub clis: Vec<(&'static str, &'static str, &'static str)>,
+    pub checked: Vec<bool>,
+    pub sel: usize,
+}
+
 /// Packages 页整体状态。
 #[derive(Clone, Default)]
 pub struct PkgState {
@@ -591,6 +600,9 @@ pub struct PkgState {
     pub spin: usize,
     pub progress: Option<(u64, Option<u64>)>,
     pub running: bool,
+    /// 装完 vibekeys 待处理:自动跑 install-script + 弹 plugin 询问。
+    pub vibekeys_pending: bool,
+    pub plugin_ask: Option<PluginAsk>,
 }
 
 // ===== 设备页整体状态 =====

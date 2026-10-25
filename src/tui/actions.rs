@@ -52,6 +52,8 @@ pub struct PkgJob {
 pub enum PkgJobOut {
     /// 动作结果 + 刷新后的包表(线程里 fetch,UI 线程零阻塞)。
     Finished(anyhow::Result<()>, Vec<Entry>),
+    /// plugin 安装结果行(Claude Code plugin installed / … failed)。
+    PluginsDone(Vec<String>),
 }
 
 impl PkgJob {
@@ -188,6 +190,49 @@ fn fresh_entries(dir: &Path) -> Vec<Entry> {
     entries
 }
 
+/// 后台执行勾选的 plugin 安装(marketplace add + plugin install)。
+/// 结果行经 PluginsDone 回到 footer。
+fn start_plugin_install(
+    state: &mut PkgState,
+    rt: &mut PkgRuntime,
+    picks: Vec<(&'static str, &'static str, &'static str)>,
+) {
+    state.job_label = "installing plugins".into();
+    state.running = true;
+    state.progress = None;
+    rt.job = Some(spawn_pkg_job(
+        std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default())),
+        move || {
+            let results: Vec<String> = picks
+                .iter()
+                .map(|(cli, action, label)| {
+                    install_plugin_cli(cli, action, label)
+                })
+                .collect();
+            PkgJobOut::PluginsDone(results)
+        },
+    ));
+}
+
+/// 装 (cli, label) 的 agent plugin:marketplace add + plugin install。
+/// 返回总结行(footer 显示)。
+fn install_plugin_cli(cli: &str, action: &str, label: &str) -> String {
+    let mkt = std::process::Command::new(cli)
+        .args(["plugin", "marketplace", "add", "second-state/marketplace"])
+        .output();
+    let inst = std::process::Command::new(cli)
+        .args(["plugin", action, "vibekeys@second-state-tools"])
+        .output();
+    match (mkt, inst) {
+        (Ok(a), Ok(b)) if a.status.success() && b.status.success() => {
+            format!("{label} plugin installed")
+        }
+        _ => format!(
+            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
+        ),
+    }
+}
+
 /// 安装/更新 `entries[idx]`。已最新直接写 footer;真要下载丢后台线程。
 pub fn install_pkg(
     state: &mut PkgState,
@@ -212,6 +257,7 @@ pub fn install_pkg(
     let (dir2, dry2) = (dir.to_path_buf(), dry_run);
     state.job_label = format!("installing {}", pkg.name);
     state.running = true;
+    state.vibekeys_pending = pkg.name == "vibekeys";
     state.progress = None;
     let progress: SharedProgress = std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
     let tick_progress = progress.clone();
@@ -243,7 +289,10 @@ pub fn uninstall_pkg(state: &mut PkgState, dir: &Path, dry_run: bool, idx: usize
     }
     let res = install::uninstall(pkg, dir, dry_run);
     state.message = format!("{}: {}", pkg.name, describe(&res, dry_run));
-    state.entries = fresh_entries(dir);
+    // 包表刷新走 ticker 的 spawn_blocking——这里在 tokio UI 线程上,
+    // 直接调 reqwest blocking 会在 async 上下文里 drop 它的内部
+    // runtime,触发 "Cannot drop a runtime" panic。
+    state.refresh_pending = true;
 }
 
 /// 全部更新(后台线程)。
@@ -290,8 +339,21 @@ pub fn update_all(state: &mut PkgState, rt: &mut PkgRuntime, dir: &Path, dry_run
     state.message = "update all: running…".into();
 }
 
+/// 本机是否有该 CLI。
+fn cli_on_path(cli: &str) -> bool {
+    std::process::Command::new(cli)
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 /// 轮询包任务;完成则写 footer 消息并换上新表。
-pub fn poll_pkg_job(state: &mut PkgState, rt: &mut PkgRuntime, dry_run: bool) -> Option<String> {
+pub fn poll_pkg_job(
+    state: &mut PkgState,
+    rt: &mut PkgRuntime,
+    dir: &Path,
+    dry_run: bool,
+) -> Option<String> {
     let job = rt.job.as_ref()?;
     if !job.is_done() {
         // 进度快照刷新 + 转圈。
@@ -310,7 +372,46 @@ pub fn poll_pkg_job(state: &mut PkgState, rt: &mut PkgRuntime, dry_run: bool) ->
         Some(PkgJobOut::Finished(res, entries)) => {
             state.entries = entries;
             state.sel = state.sel.min(state.entries.len().saturating_sub(1));
-            Some(format!("{}: {}", state.job_label, describe(&res, dry_run)))
+            let mut msg = format!("{}: {}", state.job_label, describe(&res, dry_run));
+            // vibekeys 装完:自动跑 install-script,并按本机 CLI 情况弹 plugin 询问。
+            if state.vibekeys_pending {
+                state.vibekeys_pending = false;
+                if res.is_ok() && !dry_run {
+                    let bin = dir.join("vibekeys");
+                    match std::process::Command::new(&bin)
+                        .arg("install-script")
+                        .output()
+                    {
+                        Ok(o) if o.status.success() => {
+                            msg.push_str(" · jump script installed");
+                        }
+                        Ok(o) => msg.push_str(&format!(
+                            " · install-script failed: {}",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )),
+                        Err(e) => msg.push_str(&format!(" · install-script failed: {e}")),
+                    }
+                    let mut clis: Vec<(&'static str, &'static str, &'static str)> = Vec::new();
+                    if cli_on_path("claude") {
+                        clis.push(("claude", "install", "Claude Code"));
+                    }
+                    if cli_on_path("codex") {
+                        clis.push(("codex", "add", "Codex"));
+                    }
+                    if !clis.is_empty() {
+                        let n = clis.len();
+                        state.plugin_ask = Some(super::state::PluginAsk {
+                            clis,
+                            checked: vec![true; n],
+                            sel: 0,
+                        });
+                    }
+                }
+            }
+            Some(msg)
+        }
+        Some(PkgJobOut::PluginsDone(lines)) => {
+            Some(format!("{}: {}", state.job_label, lines.join(" · ")))
         }
         _ => Some(format!("{}: background task died", state.job_label)),
     }
@@ -988,6 +1089,43 @@ pub fn handle_key(
     }
 
     // ---- Packages 页 ----
+    if let Some(ask) = pkg.plugin_ask.as_mut() {
+        if code == KeyCode::Tab {
+            return KeyOutcome::none();
+        }
+        match code {
+            KeyCode::Esc => pkg.plugin_ask = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                ask.sel = (ask.sel + 1).min(ask.clis.len() - 1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => ask.sel = ask.sel.saturating_sub(1),
+            KeyCode::Char(' ') => {
+                if let Some(c) = ask.checked.get_mut(ask.sel) {
+                    *c = !*c;
+                }
+            }
+            KeyCode::Enter => {
+                let ask = pkg.plugin_ask.take().expect("checked above");
+                let picks: Vec<_> = ask
+                    .clis
+                    .iter()
+                    .zip(&ask.checked)
+                    .filter(|(_, c)| **c)
+                    .map(|(c, _)| *c)
+                    .collect();
+                if picks.is_empty() {
+                    return KeyOutcome::msg("no plugin selected".into());
+                }
+                start_plugin_install(pkg, pkg_rt, picks);
+                if pkg.running {
+                    return KeyOutcome::none();
+                }
+                return KeyOutcome::msg(std::mem::take(&mut pkg.message));
+            }
+            _ => {}
+        }
+        return KeyOutcome::none();
+    }
     if pkg.menu.is_some() {
         if code == KeyCode::Tab {
             return KeyOutcome::none();
