@@ -527,7 +527,7 @@ fn demo_install_plugin(label: &str) -> String {
 }
 
 /// 连接成功后的分流:键盘 → 输入方式;手表 → 确保 vibetty → remote 询问。
-fn after_connect(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
+fn after_connect(st: &mut WizardState, dir: &Path) {
     st.log.push(format!("connected to {}", st.device.name()));
     match st.device {
         DeviceKind::VibeKeys => st.step = Step::InputMethod,
@@ -1048,7 +1048,7 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                 st.connecting = None;
                 rt.pending_name = None;
                 match res {
-                    Ok(_) => after_connect(st, rt, dir),
+                    Ok(_) => after_connect(st, dir),
                     Err(e) => {
                         rt.session = None;
                         st.err = Some(format!("connect failed: {e:#} — Enter to scan again"));
@@ -1091,7 +1091,7 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             Some(WizOut::Connected(Ok(cfg))) => {
                 st.connecting = None;
                 rt.mock = cfg; // demo:后续写入落这份假配置
-                after_connect(st, rt, dir);
+                after_connect(st, dir);
             }
             Some(WizOut::Connected(Err(e))) => {
                 st.connecting = None;
