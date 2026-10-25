@@ -579,6 +579,9 @@ fn start_install(st: &mut WizardState, rt: &mut WizardRuntime, kind: JobKind) {
     }
     let progress = rt.progress.clone();
     let tick_progress = progress.clone();
+    let is_vibekeys = kind == JobKind::InstallVibekeys;
+    let dir = pkg::install_dir(None);
+    let bin = dir.join(p.link_name());
     rt.job = Some(spawn_wiz(move || {
         let tick = move |d: u64, t: Option<u64>| {
             if let Ok(mut g) = tick_progress.lock() {
@@ -586,16 +589,24 @@ fn start_install(st: &mut WizardState, rt: &mut WizardRuntime, kind: JobKind) {
                 g.total = t;
             }
         };
-        match install::install(
-            p,
-            None,
-            false,
-            &pkg::install_dir(None),
-            dry_run,
-            false,
-            &tick,
-        ) {
-            Ok(log) => WizOut::Installed(Ok(log)),
+        match install::install(p, None, false, &dir, dry_run, false, &tick) {
+            Ok(mut log) => {
+                // vibekeys 装完顺带跑它的 install-script:jump 脚本落到
+                // ~/.vibekeys/scripts,插件 hook 链依赖它。幂等,本地秒级。
+                if is_vibekeys && !dry_run {
+                    match std::process::Command::new(&bin).arg("install-script").output() {
+                        Ok(o) if o.status.success() => {
+                            log.push_str("jump script installed\n");
+                        }
+                        Ok(o) => log.push_str(&format!(
+                            "install-script failed: {}\n",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )),
+                        Err(e) => log.push_str(&format!("install-script failed: {e}\n")),
+                    }
+                }
+                WizOut::Installed(Ok(log))
+            }
             Err(e) => WizOut::Installed(Err(e)),
         }
     }));
@@ -1450,6 +1461,13 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             Some(WizOut::Installed(Ok(log))) => match kind {
                 Some(JobKind::InstallVibekeys) => {
                     st.log.push("installed vibekeys".into());
+                    // install-script 的结果(jump 脚本)进总结页。
+                    for line in log.lines() {
+                        let t = line.trim();
+                        if t.contains("jump script") || t.starts_with("install-script failed") {
+                            st.log.push(t.to_string());
+                        }
+                    }
                     plugin_next(st, rt, dir);
                 }
                 Some(JobKind::InstallVibetty) => {
