@@ -29,6 +29,17 @@ vibetty  0.4.0      0.4.2   -
 vibekeys 0.3.1      0.4.0   0.4.3-rc.1
 ```
 
+### Guided setup (wizard)
+
+New to the vibe family? `vibeup wizard` walks you through everything step by step: connecting a VibeKeys keyboard or VibeWatch over Bluetooth, picking your input method (or whisper ASR endpoint), installing vibekeys / vibetty, adding their agent plugins for Claude Code / Codex, configuring WiFi, and pointing the devices at your broker (LAN address, Tailscale, or EMQX):
+
+```sh
+vibeup wizard          # guided setup
+vibeup wizard --demo   # same flow with fake devices (no BLE needed)
+```
+
+Every step can be skipped, and a summary at the end shows exactly what was installed and written.
+
 ### Packages
 
 ```sh
@@ -48,6 +59,8 @@ Global flags:
 | `--dry-run` | Print what would happen without downloading or writing |
 
 Binaries are installed atomically as `<bin>-<version>` with a `<bin>` symlink (a copy on Windows) pointing at the active version; superseded versions are cleaned up automatically.
+
+In the TUI's Packages tab, `vibeup` itself is listed on the first row — its updates show up there like any other package, so you can upgrade vibeup from within the TUI.
 
 ### Device configuration (BLE)
 
@@ -125,6 +138,8 @@ vibeup tui --demo   # same flow with fake devices and data (no BLE)
 Three tabs, switched with `Tab` or `1`/`2`/`3`:
 
 - **Keyboard** / **Watch** — BLE device setup: entering the tab starts a background scan, discovered devices are listed for you to pick, and connecting opens a config screen grouped by feature (server / wifi / asr / …). Each row shows an action plus its current value; editable items turn into in-place input boxes, complex entries (adding WiFi) open a centered popup form, and the wifi list is dynamic (Enter to edit a password, `d` to delete, `add +` for a new entry). A resident BLE session keeps the connection alive and pops up a notice if the device disconnects.
-- **Packages** — install, update, and uninstall vibetty / vibekeys.
+- **Packages** — install, update, and uninstall vibetty / vibekeys (plus vibeup itself on the first row).
+
+On a fresh machine (no vibe tools installed yet) the TUI offers to launch the wizard automatically.
 
 Actions that need the terminal (scanning, installing) temporarily suspend the TUI and return when done.

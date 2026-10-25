@@ -29,6 +29,17 @@ vibetty  0.4.0      0.4.2   -
 vibekeys 0.3.1      0.4.0   0.4.3-rc.1
 ```
 
+### 引导配置(wizard)
+
+刚接触 vibe 家族?`vibeup wizard` 一步步带你走完整个流程:蓝牙连接 VibeKeys 键盘或 VibeWatch 手表、选择输入方式(或 whisper ASR 服务)、安装 vibekeys / vibetty、安装它们面向 Claude Code / Codex 的 agent plugin、配置 WiFi,并把设备指向你的 broker(局域网地址 / Tailscale / EMQX):
+
+```sh
+vibeup wizard          # 引导配置
+vibeup wizard --demo   # 同样流程,假设备假数据(不碰蓝牙)
+```
+
+每一步都可以跳过;结束时有总结页,列清本次装了什么、写了什么。
+
 ### 包管理
 
 ```sh
@@ -48,6 +59,8 @@ vibeup uninstall vibekeys
 | `--dry-run` | 只打印将要做的事,不实际下载/写盘 |
 
 二进制以 `<bin>-<版本>` 原子安装,`<bin>` symlink(Windows 上是副本)指向当前生效版本;被替换的旧版本自动清理。
+
+TUI 的 Packages 页第一行就是 `vibeup` 自己——它的更新和其他包一样出现在列表里,可以直接在 TUI 里升级 vibeup。
 
 ### 设备配置(BLE)
 
@@ -94,7 +107,9 @@ vibeup tui --demo   # 用假设备假数据走完同样流程(不碰蓝牙)
 三个标签,`Tab` 或 `1`/`2`/`3` 切换:
 
 - **键盘** / **手表** —— BLE 设备配置:进入标签自动后台扫描,扫到后列出候选设备供挑选,连接成功后进入按功能分节的配置界面(server / wifi / asr / …)。每行是「动作 + 当前值」:可编辑项原地变成编辑框,复杂输入(加 WiFi)弹居中的 pop 框分字段填写;wifi 列表是动态的(回车改密码,`d` 删除,`add +` 新增)。连接成功后持有常驻 BLE 会话,设备断连会自动弹窗提示。
-- **Packages** —— 安装、更新、卸载 vibetty / vibekeys。
+- **Packages** —— 安装、更新、卸载 vibetty / vibekeys(第一行是 vibeup 自己)。
+
+全新机器(还没装过任何 vibe 工具)打开 TUI 时,会自动询问是否进入引导配置。
 
 需要占用终端的动作(扫描、安装)会先暂时退出 TUI 模式,结束后再回来。
 
