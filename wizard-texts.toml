@@ -53,6 +53,26 @@ rescan_suffix = "— Enter to scan again"
 connect_failed = "connect failed: {e} — Enter to scan again"
 disconnected = "device disconnected: {e}"
 
+# ── 步骤 2b/19b:连接后询问配置 WiFi ─────────────────────────
+[wifi_ask]
+title = "wizard — wifi ({name})"
+text = "Configure WiFi for this device?"
+subtext = "It needs WiFi to reach the broker."
+option_yes = "Yes — add a network"
+option_no = "Skip"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+
+# SSID/密码表单(读现有列表追加,同 SSID 覆盖,上限 8 条)
+[wifi_form]
+title = "wizard — wifi"
+text = "Add a WiFi network (existing list is kept):"
+field_ssid = "ssid"
+field_password = "password"
+hint = "Tab switch field · Enter save · Esc quit"
+error_ssid_required = "ssid is required"
+error_full = "wifi list is full ({n}/{max}) — remove one first"
+log_saved = "wifi `{ssid}' saved ({n}/{max})"
+
 # ── 步骤 3:输入方式 ──────────────────────────────────────────
 [input_method]
 title = "wizard — input method"
@@ -189,6 +209,17 @@ text_self = "Enter your broker's address:"
 field = "broker"
 hint = "Enter confirm · Esc quit"
 error_invalid = "not a valid broker URL — mqtt:// mqtts:// ws:// or wss:// with a host"
+
+# ── 步骤 16b:vibetty broker 指向 127.0.0.1/localhost 时选本机 IP ──
+[loopback_choice]
+title = "wizard — broker host"
+text_1 = "Your vibetty broker points at 127.0.0.1 —"
+text_2 = "the keyboard can't reach that. Pick this"
+text_3 = "machine's address to use instead:"
+hint = "↑↓ choose · Enter confirm · Esc quit"
+error_no_ip = "broker is 127.0.0.1 but no usable non-loopback IP was found"
+# 选中后写进总结的行
+log_swapped = "server_url = {url} (vibetty 127.0.0.1 swapped)"
 
 # ── 其他错误/杂项 ───────────────────────────────────────────
 [errors]

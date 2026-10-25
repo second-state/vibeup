@@ -12,6 +12,9 @@ use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
 use crate::install;
 use crate::pkg;
+use std::io::{BufRead, BufReader};
+use std::process::Stdio;
+
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
@@ -33,6 +36,10 @@ pub enum Step {
     IsKeyboard,
     /// 2/18:扫描 → 挑选 → 连接(device 指明键盘还是手表)
     Scan,
+    /// 2b/19b:连上后询问是否配置 WiFi(可跳过)
+    WifiAsk,
+    /// WiFi 表单(SSID + 密码)
+    WifiForm,
     /// 3:输入方式
     InputMethod,
     /// 4:捕捉输入法快捷键 → MIC + prefer_asr=off
@@ -59,6 +66,8 @@ pub enum Step {
     TailscaleIp,
     /// 15:手输 broker 地址(emqx / 自建)
     BrokerInput,
+    /// 16b:vibetty config 里是 127.0.0.1/localhost → 选本机 IP 替换
+    LoopbackChoice,
     /// 17:配置完成确认页(✓ 总结,Enter 继续)
     Done,
     /// 18 之前:是否继续配置手表
@@ -104,6 +113,8 @@ pub struct WizardState {
     pub busy: Option<String>,
     pub job_kind: Option<JobKind>,
     pub progress: Option<(u64, Option<u64>)>,
+    /// busy 期间后台命令的输出快照(转圈行下方滚动显示)。
+    pub output: Vec<String>,
     pub spin: usize,
     /// 步骤 13 查到的本机 tailscale ip。
     pub ts_ip: Option<String>,
@@ -113,6 +124,9 @@ pub struct WizardState {
     pub watch_done: bool,
     /// vibetty 已就绪(本来就有或本次装的)。
     pub vibetty_done: bool,
+    /// 16b:vibetty config 里的原 broker(含 loopback host)与本机 IP 候选。
+    pub pending_broker: Option<String>,
+    pub ip_choices: Vec<String>,
     /// plugin 询问已问过(不管答了什么)。
     pub plugin_claude_asked: bool,
     pub plugin_codex_asked: bool,
@@ -137,16 +151,22 @@ impl WizardState {
             busy: None,
             job_kind: None,
             progress: None,
+            output: Vec::new(),
             spin: 0,
             ts_ip: None,
             log: Vec::new(),
             watch_done: false,
             vibetty_done: false,
+            pending_broker: None,
+            ip_choices: Vec::new(),
             plugin_claude_asked: false,
             plugin_codex_asked: false,
         }
     }
 }
+
+/// 后台任务输出行(实时流,UI 每 100ms 快照一次)。
+pub type SharedLines = Arc<Mutex<Vec<String>>>;
 
 /// 后台句柄(非 Clone,进 Arc<Mutex> 供事件 handler 与 ticker 共用)。
 pub struct WizardRuntime {
@@ -155,6 +175,8 @@ pub struct WizardRuntime {
     /// 真机连接中的设备名(Session::open 无 job,名字先存这里)。
     pub pending_name: Option<String>,
     pub progress: SharedProgress,
+    /// plugin 安装命令的实时输出。
+    pub output: SharedLines,
     /// demo 模式的假配置(无会话,写入落这里)。
     pub mock: serde_json::Value,
 }
@@ -166,6 +188,7 @@ impl Default for WizardRuntime {
             session: None,
             pending_name: None,
             progress: Arc::new(Mutex::new(DownloadProgress::default())),
+            output: Arc::new(Mutex::new(Vec::new())),
             mock: serde_json::Value::Null,
         }
     }
@@ -308,6 +331,71 @@ fn tailscale_ip() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// broker 的 host 是否指向本机回环(设备够不着)。
+fn is_loopback_broker(url: &str) -> bool {
+    let rest = url.split_once("://").map(|x| x.1).unwrap_or(url);
+    let authority = rest.split(['/', '?']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    // IPv6 字面量带方括号(如 [::1]:8080);普通 host 直接剥端口。
+    let bare = if let Some(h) = hostport.strip_prefix('[') {
+        h.split(']').next().unwrap_or(h).to_string()
+    } else {
+        hostport.split(':').next().unwrap_or(hostport).to_string()
+    };
+    bare == "127.0.0.1"
+        || bare == "::1"
+        || bare.eq_ignore_ascii_case("localhost")
+}
+
+/// 把 url 的 host 换成 ip,保留 scheme/userinfo/port/路径。
+fn broker_with_host(url: &str, ip: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (userinfo, after) = match rest.rsplit_once('@') {
+        Some((u, a)) => (format!("{u}@"), a),
+        None => (String::new(), rest),
+    };
+    let (hostport, tail) = match after.split_once('/') {
+        Some((h, t)) => (h, Some(t)),
+        None => (after, None),
+    };
+    let port = hostport
+        .rsplit_once(':')
+        .and_then(|(_, p)| (!p.is_empty()).then(|| format!(":{p}")))
+        .unwrap_or_default();
+    let tail = tail.map(|t| format!("/{t}")).unwrap_or_default();
+    format!("{scheme}://{userinfo}{ip}{port}{tail}")
+}
+
+/// 本机非回环 IPv4 候选列表(默认路由 + Linux 全量 + tailscale,去重)。
+fn local_ips() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // 默认路由地址(UDP connect 技巧,不发包)。
+    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && s.connect("8.8.8.8:80").is_ok()
+        && let Ok(a) = s.local_addr()
+    {
+        out.push(a.ip().to_string());
+    }
+    // Linux:hostname -I 列出全部 IPv4。
+    if let Ok(o) = std::process::Command::new("hostname").arg("-I").output()
+        && o.status.success()
+    {
+        for ip in String::from_utf8_lossy(&o.stdout).split_whitespace() {
+            out.push(ip.to_string());
+        }
+    }
+    // tailscale 网段。
+    if let Some(ip) = tailscale_ip() {
+        out.push(ip);
+    }
+    out.retain(|ip| !ip.starts_with("127.") && ip != "::1");
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// 步骤 15 的 broker 地址校验:scheme 合法 + host 非空。
 fn broker_url_valid(url: &str) -> bool {
     let Some((scheme, rest)) = url.split_once("://") else {
@@ -327,6 +415,22 @@ fn cli_on_path(cli: &str) -> bool {
         .arg("--version")
         .output()
         .is_ok()
+}
+
+/// 读设备当前 wifi_list(真机走会话;demo/mock 直接读)。
+fn read_wifi_list(rt: &WizardRuntime) -> anyhow::Result<Vec<(String, String)>> {
+    match rt.session.as_ref() {
+        Some(s) => {
+            let cfg = s.read_config()?;
+            Ok(ble::parse_wifi_list(&serde_json::to_string(&cfg)?))
+        }
+        None => {
+            if rt.mock.is_null() {
+                anyhow::bail!("device not connected");
+            }
+            Ok(ble::parse_wifi_list(&rt.mock.to_string()))
+        }
+    }
 }
 
 /// 把按键事件转成 keymap binding 字符串("Ctrl+Space" / "A" / "F5")。
@@ -501,34 +605,129 @@ fn start_install(st: &mut WizardState, rt: &mut WizardRuntime, kind: JobKind) {
     }));
 }
 
-/// 装 (cli, label) 的 agent plugin:marketplace add + plugin install。
-/// hook 配置都在 plugin 里,装上即生效。返回总结页要显示的行。
-fn install_plugin(cli: &str, action: &str, label: &str) -> String {
-    let mkt = std::process::Command::new(cli)
-        .args(["plugin", "marketplace", "add", "second-state/marketplace"])
-        .output();
-    let inst = std::process::Command::new(cli)
-        .args(["plugin", action, "vibekeys@second-state-tools"])
-        .output();
-    match (mkt, inst) {
-        (Ok(a), Ok(b)) if a.status.success() && b.status.success() => {
-            format!("{label} plugin installed")
+/// 过滤 ANSI 转义序列与回车(claude/codex CLI 的进度条输出在 TUI 里是乱码)。
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                // CSI 序列:跳到结束字节(@..~)。
+                if let Some('[') = chars.next() {
+                    for c2 in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c2) {
+                            break;
+                        }
+                    }
+                }
+            }
+            '\r' => {}
+            other => out.push(other),
         }
-        _ => format!(
-            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-        ),
+    }
+    out
+}
+
+/// 往共享输出缓冲推一行(限长,保留最近 80 行)。
+fn push_line(sink: &SharedLines, line: &str) {
+    let clean = strip_ansi(line);
+    if clean.trim().is_empty() {
+        return;
+    }
+    let mut g = sink.lock().unwrap();
+    g.push(format!("  │ {}", clean.chars().take(90).collect::<String>()));
+    let len = g.len();
+    if len > 80 {
+        g.drain(..len - 80);
     }
 }
 
-/// demo 假装装 plugin(1s 成功)。
-fn demo_install_plugin(label: &str) -> String {
-    std::thread::sleep(std::time::Duration::from_secs(1));
+/// 跑一条命令,stdout/stderr 逐行实时推给 sink。返回是否成功退出。
+fn stream_cmd(cli: &str, args: &[&str], sink: &SharedLines) -> bool {
+    push_line(sink, &format!("$ {cli} {}", args.join(" ")));
+    let Ok(mut child) = std::process::Command::new(cli)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        push_line(sink, "  failed to spawn");
+        return false;
+    };
+    // stderr 单独线程读,stdout 本线程读,防管道写满互相卡死。
+    let stderr = child.stderr.take();
+    let sink2 = sink.clone();
+    let err_reader = std::thread::spawn(move || {
+        if let Some(s) = stderr {
+            for line in BufReader::new(s).lines().map_while(Result::ok) {
+                push_line(&sink2, &line);
+            }
+        }
+    });
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            push_line(sink, &line);
+        }
+    }
+    let status = child.wait();
+    let _ = err_reader.join();
+    match status {
+        Ok(s) if s.success() => {
+            push_line(sink, "  ✓ done");
+            true
+        }
+        Ok(s) => {
+            push_line(sink, &format!("  ✗ exit {}", s.code().unwrap_or(-1)));
+            false
+        }
+        Err(e) => {
+            push_line(sink, &format!("  ✗ {e}"));
+            false
+        }
+    }
+}
+
+/// 装 (cli, label) 的 agent plugin:marketplace add + plugin install。
+/// hook 配置都在 plugin 里,装上即生效。输出实时流到 sink。
+/// 返回总结页要显示的行。
+fn install_plugin(cli: &str, action: &str, label: &str, sink: &SharedLines) -> String {
+    let ok1 = stream_cmd(
+        cli,
+        &["plugin", "marketplace", "add", "second-state/marketplace"],
+        sink,
+    );
+    let ok2 = stream_cmd(cli, &["plugin", action, "vibekeys@second-state-tools"], sink);
+    if ok1 && ok2 {
+        format!("{label} plugin installed")
+    } else {
+        format!(
+            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
+        )
+    }
+}
+
+/// demo 假装装 plugin(输出也走流)。
+fn demo_install_plugin(label: &str, sink: &SharedLines) -> String {
+    push_line(sink, "(demo) adding marketplace…");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    push_line(sink, "(demo) marketplace added");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    push_line(sink, "(demo) plugin installed");
+    std::thread::sleep(std::time::Duration::from_millis(400));
     format!("{label} plugin installed (demo)")
 }
 
 /// 连接成功后的分流:键盘 → 输入方式;手表 → 确保 vibetty → remote 询问。
-fn after_connect(st: &mut WizardState, dir: &Path) {
+fn after_connect(st: &mut WizardState) {
     st.log.push(format!("connected to {}", st.device.name()));
+    // 连上先问 WiFi(键盘/手表都需要),再走各自的后续。
+    st.choice = 0;
+    prep_form(st);
+    st.step = Step::WifiAsk;
+}
+
+/// WiFi 询问(保存或跳过)之后的去向:键盘 → 输入方式;手表 → 确保 vibetty → remote。
+fn route_after_connect(st: &mut WizardState, dir: &Path) {
     match st.device {
         DeviceKind::VibeKeys => st.step = Step::InputMethod,
         _ => {
@@ -539,6 +738,7 @@ fn after_connect(st: &mut WizardState, dir: &Path) {
                 prep_form(st);
                 st.step = Step::InstallVibettyAsk;
             } else {
+                st.choice = 0;
                 st.step = Step::RemoteOutside;
             }
         }
@@ -574,6 +774,23 @@ fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
     match (bin, cfg) {
         (true, Some(url)) => {
             // 16:把 vibetty 现有 broker 通过 ble 发给键盘。
+            // 回环地址设备够不着 → 列出本机 IP 让用户选。
+            if is_loopback_broker(&url) {
+                let ips = local_ips();
+                if ips.is_empty() {
+                    st.err = Some(
+                        "broker is 127.0.0.1 but no usable non-loopback IP was found"
+                            .into(),
+                    );
+                    st.step = Step::RemoteOutside;
+                } else {
+                    st.pending_broker = Some(url);
+                    st.ip_choices = ips;
+                    st.choice = 0;
+                    st.step = Step::LoopbackChoice;
+                }
+                return;
+            }
             match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                 Ok(()) => {
                     st.log.push(format!("server_url = {url} (from vibetty config)"));
@@ -725,6 +942,77 @@ pub fn wizard_key(
             }
         }
 
+        Step::WifiAsk => {
+            if up {
+                st.choice = st.choice.saturating_sub(1);
+            } else if down {
+                st.choice = (st.choice + 1).min(1);
+            } else if enter {
+                if st.choice == 0 {
+                    prep_form(st);
+                    st.step = Step::WifiForm;
+                } else {
+                    route_after_connect(st, dir);
+                }
+            }
+        }
+
+        Step::WifiForm => {
+            if key.code == KeyCode::Tab || up || down {
+                st.field2 = !st.field2;
+            } else if enter {
+                if !st.field2 {
+                    st.field2 = true;
+                } else {
+                    let ssid = st.input.buf.trim().to_string();
+                    let pass = st.input2.buf.trim().to_string();
+                    if ssid.is_empty() {
+                        st.err = Some("ssid is required".into());
+                        st.field2 = false;
+                        return Outcome::none();
+                    }
+                    let mut list = match read_wifi_list(rt) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            st.err = Some(format!("{e:#}"));
+                            return Outcome::none();
+                        }
+                    };
+                    match list.iter_mut().find(|(s, _)| *s == ssid) {
+                        Some(entry) => entry.1 = pass,
+                        None => {
+                            if list.len() >= ble::MAX_WIFI_CREDS {
+                                st.err = Some(format!(
+                                    "wifi list is full ({}/{}) — remove one first",
+                                    list.len(),
+                                    ble::MAX_WIFI_CREDS
+                                ));
+                                return Outcome::none();
+                            }
+                            list.push((ssid.clone(), pass));
+                        }
+                    }
+                    let n = list.len();
+                    let res = wiz_write_field(
+                        st,
+                        rt,
+                        "wifi_list",
+                        ble::wifi_list_to_json(&list),
+                    );
+                    match res {
+                        Ok(()) => {
+                            st.log
+                                .push(format!("wifi `{ssid}' saved ({n}/{})", ble::MAX_WIFI_CREDS));
+                            route_after_connect(st, dir);
+                        }
+                        Err(e) => st.err = Some(format!("{e:#}")),
+                    }
+                }
+            } else {
+                feed_input(st, key);
+            }
+        }
+
         Step::InputMethod => {
             if up {
                 st.choice = st.choice.saturating_sub(1);
@@ -831,15 +1119,20 @@ pub fn wizard_key(
                     ("codex", "add", "Codex", JobKind::PluginCodex)
                 };
                 if st.choice == 0 {
-                    // yes:后台执行两条命令(demo 假装成功)。
+                    // yes:后台执行两条命令,输出实时流到进度屏。
                     st.busy = Some(format!("installing {label} plugin"));
                     st.job_kind = Some(kind);
                     st.progress = None;
+                    st.output.clear();
+                    if let Ok(mut o) = rt.output.lock() {
+                        o.clear();
+                    }
                     let demo = st.demo;
+                    let sink = rt.output.clone();
                     rt.job = Some(spawn_wiz(move || {
                         let res = match demo {
-                            true => demo_install_plugin(label),
-                            false => install_plugin(cli, action, label),
+                            true => demo_install_plugin(label, &sink),
+                            false => install_plugin(cli, action, label, &sink),
                         };
                         WizOut::Installed(Ok(res))
                     }));
@@ -964,6 +1257,32 @@ pub fn wizard_key(
             _ => {}
         },
 
+        Step::LoopbackChoice => {
+            if up {
+                st.choice = st.choice.saturating_sub(1);
+            } else if down {
+                st.choice = (st.choice + 1).min(st.ip_choices.len().saturating_sub(1));
+            } else if enter {
+                let Some(ip) = st.ip_choices.get(st.choice).cloned() else {
+                    return Outcome::none();
+                };
+                let base = st.pending_broker.clone().unwrap_or_default();
+                let url = broker_with_host(&base, &ip);
+                match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
+                    Ok(()) => {
+                        st.log
+                            .push(format!("server_url = {url} (vibetty 127.0.0.1 swapped)"));
+                        st.vibetty_done = true;
+                        st.choice = 0;
+                        st.pending_broker = None;
+                        st.ip_choices.clear();
+                        st.step = Step::Done;
+                    }
+                    Err(e) => st.err = Some(format!("{e:#}")),
+                }
+            }
+        }
+
         Step::BrokerInput => {
             if enter {
                 let url = st.input.buf.trim().to_string();
@@ -1048,7 +1367,7 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                 st.connecting = None;
                 rt.pending_name = None;
                 match res {
-                    Ok(_) => after_connect(st, dir),
+                    Ok(_) => after_connect(st),
                     Err(e) => {
                         rt.session = None;
                         st.err = Some(format!("connect failed: {e:#} — Enter to scan again"));
@@ -1091,7 +1410,7 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             Some(WizOut::Connected(Ok(cfg))) => {
                 st.connecting = None;
                 rt.mock = cfg; // demo:后续写入落这份假配置
-                after_connect(st, dir);
+                after_connect(st);
             }
             Some(WizOut::Connected(Err(e))) => {
                 st.connecting = None;
@@ -1125,11 +1444,16 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
         }
     }
 
-    // 进行中:进度 + 转圈。
+    // 进行中:进度 + 转圈 + 命令输出快照。
     if st.busy.is_some() {
         st.spin = st.spin.wrapping_add(1);
         if let Ok(p) = rt.progress.lock() {
             st.progress = Some((p.downloaded, p.total));
+        }
+        if let Ok(o) = rt.output.lock() {
+            if st.output != *o {
+                st.output = o.clone();
+            }
         }
     }
 }
@@ -1222,9 +1546,15 @@ fn step_screen(st: &WizardState) -> Screen {
             }
             _ => format!(" {frame} {label}…"),
         };
+        let mut text = vec![text_line(&body)];
+        // plugin 安装命令的实时输出(最近 6 行,旧的在上、新的在下)。
+        let tail: Vec<String> = st.output.iter().rev().take(6).rev().cloned().collect();
+        for l in tail {
+            text.push(Line::from(Span::styled(l, dim())));
+        }
         return Screen {
             title: "wizard".into(),
-            text: vec![text_line(&body)],
+            text,
             body: vec![],
             hint: vec![hint_line("working…")],
             alert: false,
@@ -1296,6 +1626,24 @@ fn step_screen(st: &WizardState) -> Screen {
                     .collect();
                 s.hint = vec![hint_line("↑↓ choose · Enter connect · Esc quit")];
             }
+        }
+        Step::WifiAsk => {
+            s.title = format!("wizard — wifi ({name})");
+            s.text = vec![
+                text_line("Configure WiFi for this device?"),
+                dim_text("It needs WiFi to reach the broker."),
+            ];
+            s.body = choices(st, &["Yes — add a network", "Skip"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+        }
+        Step::WifiForm => {
+            s.title = "wizard — wifi".into();
+            s.text = vec![text_line("Add a WiFi network (existing list is kept):")];
+            s.body = vec![
+                field_line("ssid", &st.input, !st.field2),
+                field_line("password", &st.input2, st.field2),
+            ];
+            s.hint = vec![hint_line("Tab switch field · Enter save · Esc quit")];
         }
         Step::InputMethod => {
             s.title = "wizard — input method".into();
@@ -1425,6 +1773,24 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![field_line("auth-key", &st.input, true)];
             s.hint = vec![hint_line("Enter send to device · Esc quit")];
+        }
+        Step::LoopbackChoice => {
+            s.title = "wizard — broker host".into();
+            s.text = vec![
+                text_line("Your vibetty broker points at 127.0.0.1 —"),
+                dim_text("the keyboard can't reach that. Pick this"),
+                dim_text("machine's address to use instead:"),
+            ];
+            let base = st.pending_broker.clone().unwrap_or_default();
+            s.body = st
+                .ip_choices
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| {
+                    option_line(broker_with_host(&base, ip), i == st.choice)
+                })
+                .collect();
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::TailscaleIp => {
             // 只有查不到 ip 才会停留在这个屏(查到直接落 broker 去总结)。
@@ -1642,4 +2008,35 @@ pub fn WizardApp(props: &WizardAppProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let screen = WizardScreen { screen: step_screen(&st) };
     let el: AnyElement<'static> = element!(Center { widget(screen) }).into();
     el
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_detection() {
+        assert!(is_loopback_broker("mqtt://127.0.0.1:1883"));
+        assert!(is_loopback_broker("mqtt://localhost:1883"));
+        assert!(is_loopback_broker("mqtt://LOCALHOST"));
+        assert!(is_loopback_broker("wss://[::1]:8080")); // 简化匹配: host 以 [::1 开头也算? 见实现
+        assert!(!is_loopback_broker("mqtts://abc.emqx.cloud:8883"));
+        assert!(!is_loopback_broker("mqtt://192.168.1.250:1883"));
+    }
+
+    #[test]
+    fn host_swap_preserves_everything_but_host() {
+        assert_eq!(
+            broker_with_host("mqtt://127.0.0.1:1883", "192.168.1.250"),
+            "mqtt://192.168.1.250:1883"
+        );
+        assert_eq!(
+            broker_with_host("mqtt://127.0.0.1", "10.0.0.2"),
+            "mqtt://10.0.0.2"
+        );
+        assert_eq!(
+            broker_with_host("wss://user:pw@127.0.0.1:8080/mqtt", "192.168.1.2"),
+            "wss://user:pw@192.168.1.2:8080/mqtt"
+        );
+    }
 }

@@ -8,7 +8,12 @@
 
 2. 提示用户:打开键盘,进入 keyboard 模式。开始扫描键盘。
    扫描页提示:如果扫描不到,按一下键盘的 ACCEPT(重新广播)。
-   连接上键盘 -> 3
+   连接上键盘 -> 2b
+
+2b. 询问是否要配置 WiFi?(可跳过;设备需要 WiFi 才能连 broker)
+    - 是 -> SSID + 密码表单(读现有 wifi_list 追加,同 SSID 覆盖,上限 8 条,
+      BLE 写回) -> 3
+    - 否 -> 3
 
 3. 用什么输入方式?
    - 本地输入(typeless 类似) -> 4
@@ -74,7 +79,11 @@
     - 不符合 -> 提示不符合要求,重新输入 -> 15
     - 符合 -> 通过 ble 发送给键盘的 server-url,并写入 vibetty 的 config -> 17
 
-16. 读取 vibetty config 里的 broker url,通过 ble 设置给键盘的 server-url -> 17
+16. 读取 vibetty config 里的 broker url。
+    - host 是 127.0.0.1 / localhost / ::1:列出本机全部非回环 IP
+      (默认路由地址 + `hostname -I` + tailscale,去重),
+      让用户选一个,替换 host 后通过 ble 发给键盘 -> 17
+    - 其他 host:原样通过 ble 设置给键盘的 server-url -> 17
 
 17. 配置完成确认页:逐条 ✓ 列出本次已写入的配置(BLE、安装、文件)。
     Enter 继续:
@@ -86,7 +95,11 @@
     - 否 -> 22
 
 19. 提示用户:打开手表,进入配网模式(Setting → Enable BLE)。
-    开始扫描手表,连接 -> 20
+    开始扫描手表,连接 -> 19b
+
+19b. 询问是否要配置 WiFi?(可跳过;同 2b 的表单与写路径)
+    - 是 -> 表单保存 -> 20
+    - 否 -> 20
 
 20. 手表只有 remote 模式(没有本地输入/ASR/键位这些步骤)。
     会在局域网外使用 remote 吗?
@@ -110,7 +123,9 @@ flowchart TD
     START([vibeup wizard]) --> KB{"1. 要配置键盘吗?"}
     KB -- "否" --> WATCHASK{"18. 配置手表吗?"}
     KB -- "是" --> SCAN["2. 扫描 → 挑选 → 连接<br>(失败 Enter 重扫)"]
-    SCAN --> IM{"3. 输入方式?"}
+    SCAN --> WIFA{"2b. 配置 WiFi?"}
+    WIFA -- "是:SSID+密码表单" --> IM{"3. 输入方式?"}
+    WIFA -- "跳过" --> IM
     IM -- "本地输入" --> HOT["4. 捕捉快捷键<br>MIC + prefer_asr=off"]
     IM -- "whisper API" --> ASR["5. url + api-key<br>asr_config + prefer_asr=on"]
     HOT --> VK{"6. 安装 vibekeys?"}
@@ -122,7 +137,9 @@ flowchart TD
     PC -- "Skip" --> PX
     PX -- "Yes → 执行 2 条命令" --> CHK{"7. vibetty 检查<br>二进制 + config 都查<br>(demo 一律当没装)"}
     PX -- "Skip" --> CHK
-    CHK -- "都有" --> PUSH[["16. 推现有 broker 给设备"]]
+    CHK -- "都有" --> LPB{"16. broker 指向 127.0.0.1?"}
+    LPB -- "是:列本机非回环 IP 让用户选,替换 host" --> DONE
+    LPB -- "否:原样推送" --> DONE
     CHK -- "只有二进制" --> REMOTE{"10. 局域网外用 remote?"}
     CHK -- "都没有" --> VB{"8. 安装 vibetty?"}
     VB -- "是" --> VBI[["9. 安装 vibetty(进度)"]]
@@ -140,13 +157,14 @@ flowchart TD
     IP -- "无:Enter 重试 / e 手输" --> URL
     APPLY --> DONE
     APPLY2 --> DONE
-    PUSH --> DONE
     URL --> DONE
     DONE -- "手表未配置" --> WATCHASK
     DONE -- "手表已配置" --> EXIT([退出])
     WATCHASK -- "是" --> WSCAN["扫描 → 挑选 → 连接手表"]
     WATCHASK -- "否" --> EXIT
-    WSCAN --> WV{"vibetty 就绪?"}
+    WSCAN --> WIFW{"19b. 配置 WiFi?"}
+    WIFW -- "是:SSID+密码表单" --> WV{"vibetty 就绪?"}
+    WIFW -- "跳过" --> WV
     WV -- "没装 → 先问装(同 8-9)" --> REMOTE
     WV -- "就绪" --> REMOTE
 ```
