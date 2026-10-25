@@ -3,7 +3,7 @@
 //! [`super::components`] 里。
 
 use crate::ble::{DeviceKind, FoundDevice, Target};
-use crate::pkg::PKGS;
+use crate::pkg::{PKGS, SELF};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use serde_json::Value;
@@ -519,9 +519,12 @@ impl Entry {
     }
 }
 
-/// 刷新全部条目的便捷入口(后台线程用)。
+/// 刷新全部条目的便捷入口(后台线程用)。vibeup 自己排第一,
+/// 同样检测已装版本与线上 release,允许在 TUI 里自更新。
 pub fn refresh_entries(dir: &Path) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = PKGS.iter().map(Entry::new).collect();
+    let mut entries: Vec<Entry> = std::iter::once(Entry::new(&SELF))
+        .chain(PKGS.iter().map(Entry::new))
+        .collect();
     fetch_entries(&mut entries, dir);
     entries
 }

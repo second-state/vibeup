@@ -6,7 +6,7 @@ use crate::ble::{self, DeviceKind, FoundDevice, SessionEvent, Target};
 use btleplug::api::{Central as _, Manager as _, Peripheral as _};
 use crate::config_cmd;
 use crate::install;
-use crate::pkg::{self, Pkg, PKGS};
+use crate::pkg::{self, Pkg, PKGS, SELF};
 use anyhow::{bail, Result};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::Path;
@@ -181,7 +181,9 @@ fn describe<T>(res: &Result<T>, dry_run: bool) -> String {
 
 /// 从注册表构建全新的包条目并刷新(阻塞网络,后台线程调用)。
 fn fresh_entries(dir: &Path) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = PKGS.iter().map(Entry::new).collect();
+    let mut entries: Vec<Entry> = std::iter::once(Entry::new(&SELF))
+        .chain(PKGS.iter().map(Entry::new))
+        .collect();
     super::state::fetch_entries(&mut entries, dir);
     entries
 }
