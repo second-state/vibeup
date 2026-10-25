@@ -448,8 +448,17 @@ impl Session {
         self.cmd_tx
             .try_send(make(tx))
             .map_err(|_| anyhow!("device session is closed"))?;
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(|_| anyhow!("device session is closed"))?
+        // 超时 ≠ 会话关闭:命令多半已发出,设备端可能卡住/重启,
+        // 写入也许已生效。分开报,别让两种故障共用一句。
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(res) => res,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("device did not respond within 5s — it may be stuck or rebooting; the write may still have been applied")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("device session is closed")
+            }
+        }
     }
 
     pub fn read_config(&self) -> Result<serde_json::Value> {
