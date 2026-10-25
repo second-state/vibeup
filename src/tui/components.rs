@@ -6,6 +6,7 @@
 use super::actions;
 use super::state::{Conn, DeviceState, PkgState, Tab};
 use crate::ble::DeviceKind;
+use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
     layout::{Constraint, Direction},
@@ -33,9 +34,27 @@ pub struct AppProps {
     pub demo: bool,
 }
 
+/// App 顶层模式:普通标签页 / 嵌入式向导(新用户引导)。
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Mode {
+    #[default]
+    Tabs,
+    Wizard,
+}
+
 #[component]
 pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let tab = hooks.use_state(|| Tab::Packages);
+    let mut mode: State<Mode> = hooks.use_state(Mode::default);
+    // 新用户询问框(启动检测后置 true)。
+    let mut ask_wizard: State<bool> = hooks.use_state(|| false);
+    let mut ask_choice: State<usize> = hooks.use_state(|| 0);
+    // 嵌入式向导的状态与后台句柄。
+    let wiz = hooks.use_state(|| super::wizard::WizardState::new(props.demo, props.dry_run));
+    let wiz_rt: State<std::sync::Arc<std::sync::Mutex<super::wizard::WizardRuntime>>> =
+        hooks.use_state(|| std::sync::Arc::new(std::sync::Mutex::new(
+            super::wizard::WizardRuntime::default(),
+        )));
     let keys = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::VibeKeys, props.demo));
     let watch = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::Watch, props.demo));
     let runtimes = hooks.use_state(|| {
@@ -49,18 +68,22 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
-    // 启动时刷新一次包表(阻塞网络,spawn_blocking)。
+    // 启动时刷新一次包表(阻塞网络,spawn_blocking),顺带做新用户检测。
     {
         let dir = props.dir.clone();
         hooks.use_future(async move {
-            let entries = tokio::task::spawn_blocking(move || {
-                super::state::refresh_entries(&dir)
+            let (entries, new_user) = tokio::task::spawn_blocking(move || {
+                let entries = super::state::refresh_entries(&dir);
+                let new_user = super::wizard::is_new_user(&dir);
+                (entries, new_user)
             })
             .await
             .unwrap_or_default();
             let mut ps = pkg.write();
             ps.entries = entries;
             ps.sel = ps.sel.min(ps.entries.len().saturating_sub(1));
+            drop(ps);
+            ask_wizard.set(new_user);
         });
     }
 
@@ -111,6 +134,14 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     }
                 }
 
+                // 嵌入式向导轮询(向导模式才需要)。
+                if mode.get() == Mode::Wizard {
+                    let wrt_arc = wiz_rt.read().clone();
+                    let mut wrt = wrt_arc.lock().unwrap();
+                    let mut wst = wiz.write();
+                    super::wizard::poll(&mut wst, &mut wrt, &dir);
+                }
+
                 // r 键请求的刷新:放锁后再阻塞拉取。
                 let refresh_now = {
                     let mut ps = pkg.write();
@@ -144,11 +175,62 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     }
 
     // 全局输入:App 级单一 handler,内部保持旧版优先级链。
+    // 向导模式与新用户询问框在链之前截获各自按键。
     {
         let dir = props.dir.clone();
         let dry_run = props.dry_run;
         let demo = props.demo;
         hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+            let Event::Key(key) = event.clone() else {
+                return EventResult::Consumed;
+            };
+            if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
+                return EventResult::Consumed;
+            }
+
+            // 嵌入式向导:吞掉所有按键;退出向导 → 回标签页 + 刷新包表。
+            if mode.get() == Mode::Wizard {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    exit();
+                    return EventResult::Consumed;
+                }
+                let wrt_arc = wiz_rt.read().clone();
+                let mut wrt = wrt_arc.lock().unwrap();
+                let mut wst = wiz.write();
+                let outcome =
+                    super::wizard::wizard_key(&mut wst, &mut wrt, &key, &dir);
+                if outcome.exit {
+                    mode.set_no_update(Mode::Tabs);
+                    pkg.write().refresh_pending = true;
+                }
+                return EventResult::Consumed;
+            }
+
+            // 新用户询问框:↑↓ 选择,Enter 确认,q/Esc 关闭。
+            if ask_wizard.get() {
+                match key.code {
+                    KeyCode::Up | KeyCode::Down => {
+                        let cur = ask_choice.get();
+                        ask_choice.set(1 - cur);
+                    }
+                    KeyCode::Enter => {
+                        let yes = ask_choice.get() == 0;
+                        ask_wizard.set(false);
+                        if yes {
+                            *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
+                            let wrt_arc = wiz_rt.read().clone();
+                            *wrt_arc.lock().unwrap() =
+                                super::wizard::WizardRuntime::default();
+                            mode.set_no_update(Mode::Wizard);
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Esc => ask_wizard.set(false),
+                    _ => {}
+                }
+                return EventResult::Consumed;
+            }
+
             let rts_arc = runtimes.read().clone();
             let mut rts = rts_arc.lock().unwrap();
             let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
@@ -188,14 +270,40 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let _ = allow_pre;
 
     let tab_val = tab.get();
-    let page_children: Vec<AnyElement<'static>> = match tab_val {
-        Tab::Keyboard => vec![element!(DevicePage(..DevicePageProps { state: keys })).into()],
-        Tab::Watch => vec![element!(DevicePage(..DevicePageProps { state: watch })).into()],
-        Tab::Packages => vec![element!(PackagesPage(..PackagesPageProps {
-            state: pkg,
-            allow_pre: allow_pre.get(),
-        })).into()],
+    let wizard_on = mode.get() == Mode::Wizard;
+    let mut page_children: Vec<AnyElement<'static>> = if wizard_on {
+        // 嵌入式向导占满页区。
+        let st = wiz.read().clone();
+        vec![super::wizard::view(&st)]
+    } else {
+        match tab_val {
+            Tab::Keyboard => vec![element!(DevicePage(..DevicePageProps { state: keys })).into()],
+            Tab::Watch => vec![element!(DevicePage(..DevicePageProps { state: watch })).into()],
+            Tab::Packages => vec![element!(PackagesPage(..PackagesPageProps {
+                state: pkg,
+                allow_pre: allow_pre.get(),
+            })).into()],
+        }
     };
+    // 新用户询问框:盖在页区上方(与包菜单弹窗同款布局)。
+    if ask_wizard.get() && !wizard_on {
+        page_children.push(element!(View(height: Constraint::Fill(1))).into());
+        page_children.push(modal(
+            "welcome",
+            vec![
+                Line::from(" No vibetty / vibekeys found — looks like a fresh start."),
+                Line::from(""),
+                option_line("Yes — open the guided setup".into(), ask_choice.get() == 0),
+                option_line("No — explore on my own".into(), ask_choice.get() == 1),
+                Line::from(Span::styled(
+                    " ↑↓ choose · Enter confirm · Esc close ",
+                    dim(),
+                )),
+            ],
+            false,
+            62,
+        ));
+    }
     let page_border = ratatui_kit::components::BorderProps {
         borders: Borders::ALL,
         border_style: Some(Style::new().dark_gray()),

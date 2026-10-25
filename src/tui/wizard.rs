@@ -66,8 +66,8 @@ pub enum Step {
     TailscaleIp,
     /// 15:手输 broker 地址(emqx / 自建)
     BrokerInput,
-    /// 16b:vibetty config 里是 127.0.0.1/localhost → 选本机 IP 替换
-    LoopbackChoice,
+    /// 14a/16b:多个本机地址时让用户选(回环替换 / 局域网模式)
+    IpPick,
     /// 17:配置完成确认页(✓ 总结,Enter 继续)
     Done,
     /// 18 之前:是否继续配置手表
@@ -127,6 +127,8 @@ pub struct WizardState {
     /// 16b:vibetty config 里的原 broker(含 loopback host)与本机 IP 候选。
     pub pending_broker: Option<String>,
     pub ip_choices: Vec<String>,
+    /// IP 选择的用途:false = 替换 loopback(16b),true = 局域网模式选网卡(14a)。
+    pub pick_lan: bool,
     /// plugin 询问已问过(不管答了什么)。
     pub plugin_claude_asked: bool,
     pub plugin_codex_asked: bool,
@@ -159,6 +161,7 @@ impl WizardState {
             vibetty_done: false,
             pending_broker: None,
             ip_choices: Vec::new(),
+            pick_lan: false,
             plugin_claude_asked: false,
             plugin_codex_asked: false,
         }
@@ -309,13 +312,6 @@ pub fn set_vibetty_broker(url: &str) -> anyhow::Result<()> {
     }
     std::fs::write(&path, out)?;
     Ok(())
-}
-
-/// 本机局域网 ip(UDP connect 技巧,不发包)。
-fn lan_ip() -> Option<std::net::IpAddr> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("8.8.8.8:80").ok()?;
-    Some(s.local_addr().ok()?.ip())
 }
 
 /// `tailscale ip -4`(命令不存在/未登录 = None)。
@@ -786,8 +782,9 @@ fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                 } else {
                     st.pending_broker = Some(url);
                     st.ip_choices = ips;
+                    st.pick_lan = false;
                     st.choice = 0;
-                    st.step = Step::LoopbackChoice;
+                    st.step = Step::IpPick;
                 }
                 return;
             }
@@ -1171,13 +1168,29 @@ pub fn wizard_key(
                 if st.choice == 0 {
                     st.step = Step::HasTailscale;
                 } else {
-                    // 14a:局域网模式。
-                    match lan_ip() {
-                        Some(ip) => {
-                            apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                    // 14a:局域网模式。多个候选地址就列出来让用户选
+                    // (单网卡自动用,不打扰)。
+                    let ips = local_ips();
+                    match ips.len() {
+                        0 => {
+                            st.err = Some(
+                                "could not detect the LAN IP — is the machine online?".into(),
+                            );
                         }
-                        None => {
-                            st.err = Some("could not detect the LAN IP — is the machine online?".into());
+                        1 => {
+                            apply_broker(
+                                st,
+                                rt,
+                                format!("{}:1883", ips[0]),
+                                "mqtt://127.0.0.1:1883",
+                            );
+                        }
+                        _ => {
+                            st.pending_broker = Some("mqtt://127.0.0.1:1883".into());
+                            st.ip_choices = ips;
+                            st.pick_lan = true;
+                            st.choice = 0;
+                            st.step = Step::IpPick;
                         }
                     }
                 }
@@ -1257,7 +1270,7 @@ pub fn wizard_key(
             _ => {}
         },
 
-        Step::LoopbackChoice => {
+        Step::IpPick => {
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
@@ -1268,11 +1281,29 @@ pub fn wizard_key(
                 };
                 let base = st.pending_broker.clone().unwrap_or_default();
                 let url = broker_with_host(&base, &ip);
+                // 局域网模式:vibetty config 落 127.0.0.1(它就在本机)。
+                let vibetty_url = if st.pick_lan {
+                    "mqtt://127.0.0.1:1883"
+                } else {
+                    ""
+                };
                 match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                     Ok(()) => {
+                        if st.pick_lan && !st.demo {
+                            if let Err(e) = set_vibetty_broker(vibetty_url) {
+                                st.err = Some(format!("vibetty config: {e:#}"));
+                                return Outcome::none();
+                            }
+                        }
                         st.log
-                            .push(format!("server_url = {url} (vibetty 127.0.0.1 swapped)"));
-                        st.vibetty_done = true;
+                            .push(format!("{} server_url = {url}", st.device.name()));
+                        if st.pick_lan {
+                            st.log
+                                .push(format!("vibetty broker = {vibetty_url}"));
+                        }
+                        if st.device != DeviceKind::VibeKeys {
+                            st.watch_done = true;
+                        }
                         st.choice = 0;
                         st.pending_broker = None;
                         st.ip_choices.clear();
@@ -1774,13 +1805,20 @@ fn step_screen(st: &WizardState) -> Screen {
             s.body = vec![field_line("auth-key", &st.input, true)];
             s.hint = vec![hint_line("Enter send to device · Esc quit")];
         }
-        Step::LoopbackChoice => {
+        Step::IpPick => {
             s.title = "wizard — broker host".into();
-            s.text = vec![
-                text_line("Your vibetty broker points at 127.0.0.1 —"),
-                dim_text("the keyboard can't reach that. Pick this"),
-                dim_text("machine's address to use instead:"),
-            ];
+            s.text = if st.pick_lan {
+                vec![
+                    text_line("Multiple network interfaces found —"),
+                    dim_text("pick the address the device can reach:"),
+                ]
+            } else {
+                vec![
+                    text_line("Your vibetty broker points at 127.0.0.1 —"),
+                    dim_text("the keyboard can't reach that. Pick this"),
+                    dim_text("machine's address to use instead:"),
+                ]
+            };
             let base = st.pending_broker.clone().unwrap_or_default();
             s.body = st
                 .ip_choices
@@ -2010,9 +2048,52 @@ pub fn WizardApp(props: &WizardAppProps, mut hooks: Hooks) -> impl Into<AnyEleme
     el
 }
 
+/// 新用户检测:没有任何 vibe 家工具已装、也没有对应的配置目录。
+pub fn is_new_user(dir: &Path) -> bool {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
+    is_new_user_in(dir, &home)
+}
+
+/// `is_new_user` 的可测内核。
+fn is_new_user_in(dir: &Path, home: &Path) -> bool {
+    let any_installed = ["vibetty", "vibekeys"].iter().any(|n| {
+        pkg::find(n)
+            .map(|p| pkg::installed_version(p, dir).is_some())
+            .unwrap_or(false)
+    });
+    if any_installed {
+        return false;
+    }
+    !(home.join(".vibetty").exists() || home.join(".vibekeys").exists())
+}
+
+/// 渲染当前向导画面(嵌入 TUI 标签页模式时用;独立 WizardApp 也走这里)。
+pub fn view(st: &WizardState) -> AnyElement<'static> {
+    let screen = WizardScreen { screen: step_screen(st) };
+    let el: AnyElement<'static> = element!(Center { widget(screen) }).into();
+    el
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_user_detection() {
+        let tmp = std::env::temp_dir().join(format!("vibeup-test-{}", std::process::id()));
+        let home = tmp.join("home");
+        let bin = tmp.join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        // 干净 home + 空 bin 目录 = 新用户。
+        assert!(is_new_user_in(&bin, &home));
+        // 有 ~/.vibetty 目录 = 老用户。
+        std::fs::create_dir_all(home.join(".vibetty")).unwrap();
+        assert!(!is_new_user_in(&bin, &home));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 
     #[test]
     fn loopback_detection() {
