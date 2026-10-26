@@ -18,7 +18,7 @@ use std::process::Stdio;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
-    layout::Rect,
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
@@ -2065,33 +2065,26 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
             + 4;
         let w = W_TEXT.max(content_w).clamp(40, 100).min(area.width.saturating_sub(2));
         let h_text = H_TEXT_INNER.max(scr.text.len() as u16) + 2;
-        // hint 嵌在下边框,不占内容行。
         let h_body = if has_body {
             scr.body.len() as u16 + 2
         } else {
             0
         };
-        let gap = if has_body { 1u16 } else { 0 };
-        let total = h_text + gap + h_body;
+        // 提示单独一行带边框的小框(内容 1 行 + 边框 2)。
+        let h_hint = if scr.hint.is_empty() { 0 } else { 3 };
+        let gap = 0u16; // 三框边框紧贴,中间不空行
+        let total = h_text + gap + h_body + gap + h_hint;
         if total > area.height {
             return; // 终端太矮:宁可空白也不画残框
         }
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(total)) / 2;
-        let bottom = scr.hint.first().cloned();
 
-        // 说明框(title 框)。无操作框时,hint 落在它的下边框。
+        // 说明框(title 框)。
         let rect1 = Rect { x, y, width: w, height: h_text };
-        draw_box(
-            rect1,
-            &format!(" {} ", scr.title),
-            &scr.text,
-            scr.alert,
-            if has_body { None } else { bottom.clone() },
-            buf,
-        );
+        draw_box(rect1, &format!(" {} ", scr.title), &scr.text, scr.alert, buf);
 
-        // 操作框(选项/输入),hint 嵌下边框。
+        // 操作框(选项/输入)。
         if has_body {
             let rect2 = Rect {
                 x,
@@ -2099,7 +2092,18 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
                 width: w,
                 height: h_body,
             };
-            draw_box(rect2, "", &scr.body, false, bottom, buf);
+            draw_box(rect2, "", &scr.body, false, buf);
+        }
+
+        // 提示框:独立的一行带边框小框。
+        if h_hint > 0 {
+            let rect3 = Rect {
+                x,
+                y: y + h_text + gap + h_body + gap,
+                width: w,
+                height: h_hint,
+            };
+            draw_box(rect3, "", &scr.hint, false, buf);
         }
     }
 }
@@ -2109,7 +2113,6 @@ fn draw_box(
     title: &str,
     lines: &[Line<'_>],
     alert: bool,
-    bottom: Option<Line<'static>>,
     buf: &mut ratatui_kit::ratatui::buffer::Buffer,
 ) {
     let border_style = if alert { err_style() } else { Style::new() };
@@ -2120,10 +2123,6 @@ fn draw_box(
             title.to_string(),
             border_style.add_modifier(Modifier::BOLD),
         ));
-    }
-    if let Some(b) = bottom {
-        // 操作提示嵌在下边框(dim),不占内容行。
-        block = block.title_bottom(b.style(Style::new().dark_gray()));
     }
     let inner = block.inner(rect);
     Clear.render(rect, buf);
@@ -2192,7 +2191,9 @@ pub fn WizardApp(props: &WizardAppProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     let st = state.read().clone();
     let screen = WizardScreen { screen: step_screen(&st) };
-    let el: AnyElement<'static> = element!(Center { widget(screen) }).into();
+    let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
+        widget(screen)
+    }).into();
     el
 }
 
@@ -2221,7 +2222,9 @@ fn is_new_user_in(dir: &Path, home: &Path) -> bool {
 /// 渲染当前向导画面(嵌入 TUI 标签页模式时用;独立 WizardApp 也走这里)。
 pub fn view(st: &WizardState) -> AnyElement<'static> {
     let screen = WizardScreen { screen: step_screen(st) };
-    let el: AnyElement<'static> = element!(Center { widget(screen) }).into();
+    let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
+        widget(screen)
+    }).into();
     el
 }
 
