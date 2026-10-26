@@ -407,47 +407,130 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
     if let Some(popup) = &st.popup {
         return element!(PopupModal(popup: popup.clone())).into();
     }
-    let mut children: Vec<AnyElement<'static>> = Vec::new();
+    // 配置行自绘:kit 的垂直布局在内容行数与页区高度不匹配时会吞掉/错位
+    // 部分子元素,所以不走 element! 组合。渲染需要的行数精确可算
+    // (连接行 2 + 每行 1 + 节标题 1×n),自绘 Widget 拿到 area 后自己
+    // 决定画多少行——两个数都在自己手里,行为确定。
+    let mut lines: Vec<Line> = Vec::new();
 
     // 连接指示。
     if let Some(name) = &st.connected_name {
-        children.push(element!(View(height: Constraint::Length(2)) {
-            Text(text: Line::from(vec![
-                Span::styled(" ● ", Style::new().green()),
-                Span::styled(name.clone(), Style::new().bold()),
-            ]))
-        }).into());
+        lines.push(Line::from(vec![
+            Span::styled(" ● ", Style::new().green()),
+            Span::styled(name.clone(), Style::new().bold()),
+        ]));
+        lines.push(Line::from(""));
     }
 
-    // 各节:加粗节名行 + 每行一个固定高度子元素(与包表格同构,布局可靠)。
+    // 各节:加粗节名行 + 每行一条。
     let mut current: Option<&'static str> = None;
+    let mut sel_line = 0usize;
     for (i, row) in st.rows.iter().enumerate() {
         if current != Some(row.section) {
             current = Some(row.section);
-            // 节标题也要显式高度:裸 Text 子元素会被 kit 布局当作可伸展空间
-            // 均分,把后面的节推到底部。
-            children.push(element!(View(height: Constraint::Length(1)) {
-                Text(text: Line::from(vec![
-                    Span::styled(format!("── {} ", row.section), Style::new().bold()),
-                    Span::styled("─".repeat(40), Style::new().dark_gray()),
-                ]))
-            }).into());
+            lines.push(Line::from(vec![
+                Span::styled(format!("── {} ", row.section), Style::new().bold()),
+                Span::styled("─".repeat(40), Style::new().dark_gray()),
+            ]));
+        }
+        if i == st.sel {
+            sel_line = lines.len();
         }
         let editing = st
             .editing
             .as_ref()
             .and_then(|(idx, input)| (*idx == i).then_some(input.clone()));
-        children.push(element!(View(height: Constraint::Length(1)) {
-            Text(text: row_line(row, i == st.sel, editing.as_ref()))
-        }).into());
+        lines.push(row_line(row, i == st.sel, editing.as_ref()));
     }
-    let vp = ratatui_kit::components::ViewProps {
-        flex_direction: Direction::Vertical,
-        children,
-        ..Default::default()
-    };
-    let el: AnyElement<'static> = element!(View(..vp)).into();
+
+    let w = RowsWidget { lines, sel_line };
+    let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
+        widget(w)
+    }).into();
     el
+}
+
+/// 设备页配置行:自绘 Widget,从区域顶部逐行画(与 keymap/弹窗同思路)。
+/// 行数渲染前可精确预测 = lines.len();行数超出页区时滚动,
+/// 窗口始终保证选中行(sel_line)可见。
+#[derive(Clone)]
+struct RowsWidget {
+    lines: Vec<Line<'static>>,
+    sel_line: usize,
+}
+
+#[cfg(test)]
+mod rows_widget_tests {
+    use super::*;
+    use ratatui_kit::ratatui::layout::Rect;
+    use ratatui_kit::ratatui::widgets::Widget as _;
+
+    fn render_lines(count: usize, sel_line: usize, height: u16) -> Vec<String> {
+        let lines: Vec<Line> = (0..count).map(|i| Line::from(format!("row {i}"))).collect();
+        let area = Rect { x: 0, y: 0, width: 20, height };
+        let mut buf = ratatui_kit::ratatui::buffer::Buffer::empty(area);
+        RowsWidget { lines, sel_line }.render(area, &mut buf);
+        (0..height)
+            .map(|y| {
+                (1..8)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn all_rows_fit_no_scroll() {
+        let rows = render_lines(5, 2, 10);
+        assert!(rows[2].contains("row 2"));
+        assert!(rows.iter().all(|r| !r.contains("row 9")));
+    }
+
+    #[test]
+    fn overflow_keeps_selection_visible() {
+        // 30 行画进 10 行窗口:选中行 28 必须可见(贴底)。
+        let rows = render_lines(30, 28, 10);
+        assert!(rows.iter().any(|r| r.contains("row 28")));
+        // 窗口内容 = row 19..29
+        assert!(rows[0].contains("row 19"));
+    }
+
+    #[test]
+    fn selection_top_stays_top() {
+        // 选中行回到顶部区域时,窗口回到顶。
+        let rows = render_lines(30, 3, 10);
+        assert!(rows[3].contains("row 3"));
+    }
+}
+
+impl ratatui_kit::ratatui::widgets::Widget for RowsWidget {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
+        use ratatui_kit::ratatui::widgets::Paragraph;
+
+        let height = area.height as usize;
+        // 无状态滚动:只保证选中行可见。选中行在窗口内则贴顶,否则贴底。
+        let offset = if self.sel_line + 1 <= height || height == 0 {
+            0
+        } else {
+            self.sel_line + 1 - height
+        };
+        for (i, line) in self.lines.iter().enumerate().skip(offset) {
+            if i >= offset + height {
+                break;
+            }
+            let row = ratatui_kit::ratatui::layout::Rect {
+                x: area.x + 1, // 左侧留一列空隙
+                y: area.y + (i - offset) as u16,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            };
+            Paragraph::new(line.clone()).render(row, buf);
+        }
+    }
 }
 
 /// 设备页一行:「动作 + 当前值」;选中反色,编辑态原地变输入框 + 块状光标。
