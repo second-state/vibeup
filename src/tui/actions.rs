@@ -602,7 +602,6 @@ pub fn keymap_popup_key(
 
     // 编辑模式:输入/保存/取消。
     if let Some((idx, input)) = &editing {
-        std::fs::write("/tmp/tui_key.log", format!("{key:?}\n")).ok();
         match key.code {
             KeyCode::Esc => {
                 if let Some(km) = state.keymap_popup.as_mut() {
@@ -741,7 +740,7 @@ pub fn keymap_popup_key(
             if let Some(km) = state.keymap_popup.as_mut() {
                 km.editing = Some((sel, super::state::Input::with_str(&current)));
             }
-            None
+            Some("Enter save · Esc cancel".into())
         }
         _ => None,
     }
@@ -1202,6 +1201,7 @@ pub fn handle_key(
                 pkg: pkg.sel,
                 sel: 0,
             });
+            return KeyOutcome::msg("↑↓ select · Enter confirm · Esc back".into());
         }
         KeyCode::Char('u') => {
             let idx = pkg.sel;
@@ -1527,7 +1527,7 @@ fn row_action(
         }
         RowAction::Popup(kind) => {
             state.popup = Some(PopupState::new(kind, Vec::new()));
-            *message = "Tab/↑↓ field · Enter save · Esc cancel".into();
+            *message = "Tab/↑↓ switch field · Enter save · Esc cancel".into();
         }
         RowAction::KeymapPopup => {
             state.keymap_popup = Some(super::state::KeymapPopupState::default());

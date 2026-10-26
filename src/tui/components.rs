@@ -64,7 +64,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
-    let message = hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions".to_string());
+    let mut message = hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions".to_string());
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
@@ -84,6 +84,9 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
             ps.sel = ps.sel.min(ps.entries.len().saturating_sub(1));
             drop(ps);
             ask_wizard.set(new_user);
+            if new_user {
+                message.set("↑↓ choose · Enter confirm · Esc close".into());
+            }
         });
     }
 
@@ -295,10 +298,6 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 Line::from(""),
                 option_line("Yes — open the guided setup".into(), ask_choice.get() == 0),
                 option_line("No — explore on my own".into(), ask_choice.get() == 1),
-                Line::from(Span::styled(
-                    " ↑↓ choose · Enter confirm · Esc close ",
-                    dim(),
-                )),
             ],
             false,
             62,
@@ -404,6 +403,10 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
     if let Some(km) = &st.keymap_popup {
         return keymap_modal(st, km);
     }
+    // WiFi 表单弹窗同理:独占内容区(append 成兄弟节点会分到 0 高度)。
+    if let Some(popup) = &st.popup {
+        return element!(PopupModal(popup: popup.clone())).into();
+    }
     let mut children: Vec<AnyElement<'static>> = Vec::new();
 
     // 连接指示。
@@ -438,13 +441,6 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
             Text(text: row_line(row, i == st.sel, editing.as_ref()))
         }).into());
     }
-    if let Some(popup) = &st.popup {
-        children.push(element!(PopupModal(popup: popup.clone())).into());
-    }
-    if let Some(km) = &st.keymap_popup {
-        children.push(keymap_modal(st, km));
-    }
-
     let vp = ratatui_kit::components::ViewProps {
         flex_direction: Direction::Vertical,
         children,
@@ -717,7 +713,7 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
             ("Install prerelease", any),
             ("Uninstall", None),
         ];
-        let mut menu_lines: Vec<Line> = items
+        let menu_lines: Vec<Line> = items
             .iter()
             .enumerate()
             .map(|(i, (label, ver))| {
@@ -728,11 +724,7 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 option_line(text, i == m.sel)
             })
             .collect();
-        menu_lines.push(Line::from(""));
-        menu_lines.push(Line::from(Span::styled(
-            " ↑↓ select · Enter confirm · Esc back",
-            dim(),
-        )));
+        // 操作提示在主页面 footer,框内不重复。
         element!(View(flex_direction: Direction::Vertical) {
             View(height: Constraint::Fill(1)) {
                 Text(text: Line::from(""))
@@ -841,13 +833,7 @@ impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
                 value,
             ]));
         }
-        lines.push(Line::from(""));
-        let hint = match &self.km.editing {
-            Some(_) => " Enter save · Esc cancel ",
-            None => " ↑↓ select · Enter edit · Esc close ",
-        };
-        lines.push(Line::from(Span::styled(hint, Style::new().dark_gray())));
-
+        // 操作提示在主页面 footer,框内不重复。
         let alert = false;
         // 宽度固定,不随内容/编辑态收缩跳变。
         let w = 52u16.min(area.width.saturating_sub(2));
@@ -899,6 +885,14 @@ pub struct PopupModalProps {
 pub fn PopupModal(props: &PopupModalProps) -> impl Into<AnyElement<'static>> {
     let popup = &props.popup;
     let mut lines: Vec<Line> = Vec::new();
+    // 改密码弹窗:标明在改哪个 SSID(与 pass 字段同列对齐)。
+    if let super::state::PopupKind::WifiPass { ssid } = &popup.kind {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("  ssid: ", Style::new().bold()),
+            Span::styled(ssid.clone(), Style::new().light_blue()),
+        ]));
+    }
     for (i, label) in popup.labels.iter().enumerate() {
         let active = i == popup.cur;
         let style = if active {
@@ -913,12 +907,9 @@ pub fn PopupModal(props: &PopupModalProps) -> impl Into<AnyElement<'static>> {
         line_spans.extend(popup.inputs[i].spans(i == popup.cur, style));
         lines.push(Line::from(line_spans));
     }
-    lines.push(Line::from(Span::styled(
-        " Tab/↑↓ field · Enter save · Esc cancel ",
-        dim(),
-    )));
+    // 操作提示在主页面 footer,框内不重复。高度按实际行数(含 ssid 行)。
     let content_w = 56u16;
-    let h = popup.labels.len() as u16 + 4;
+    let h = lines.len() as u16 + 2;
     element!(Center(width: Constraint::Length(content_w), height: Constraint::Length(h)) {
         Border(
             borders: Borders::ALL,
