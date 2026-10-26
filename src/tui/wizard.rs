@@ -129,6 +129,8 @@ pub struct WizardState {
     pub ip_choices: Vec<String>,
     /// IP 选择的用途:false = 替换 loopback(16b),true = 局域网模式选网卡(14a)。
     pub pick_lan: bool,
+    /// 走过的步骤栈(⌫ 返回上一步)。
+    pub history: Vec<Step>,
     /// plugin 询问已问过(不管答了什么)。
     pub plugin_claude_asked: bool,
     pub plugin_codex_asked: bool,
@@ -162,6 +164,7 @@ impl WizardState {
             pending_broker: None,
             ip_choices: Vec::new(),
             pick_lan: false,
+            history: Vec::new(),
             plugin_claude_asked: false,
             plugin_codex_asked: false,
         }
@@ -730,23 +733,23 @@ fn after_connect(st: &mut WizardState) {
     // 连上先问 WiFi(键盘/手表都需要),再走各自的后续。
     st.choice = 0;
     prep_form(st);
-    st.step = Step::WifiAsk;
+    goto(st, Step::WifiAsk);
 }
 
 /// WiFi 询问(保存或跳过)之后的去向:键盘 → 输入方式;手表 → 确保 vibetty → remote。
 fn route_after_connect(st: &mut WizardState, dir: &Path) {
     match st.device {
-        DeviceKind::VibeKeys => st.step = Step::InputMethod,
+        DeviceKind::VibeKeys => goto(st, Step::InputMethod),
         _ => {
             let missing = st.demo || vibetty_binary(dir).is_none();
             if !st.vibetty_done && missing {
                 // 19 注:手表路径没 vibetty 先问装(同 8-9)。
                 st.choice = 0;
                 prep_form(st);
-                st.step = Step::InstallVibettyAsk;
+                goto(st, Step::InstallVibettyAsk);
             } else {
                 st.choice = 0;
-                st.step = Step::RemoteOutside;
+                goto(st, Step::RemoteOutside);
             }
         }
     }
@@ -758,13 +761,13 @@ fn plugin_next(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
     if !st.plugin_claude_asked && cli_on_path("claude") {
         st.plugin_claude_asked = true;
         prep_form(st);
-        st.step = Step::PluginClaude;
+        goto(st, Step::PluginClaude);
         return;
     }
     if !st.plugin_codex_asked && cli_on_path("codex") {
         st.plugin_codex_asked = true;
         prep_form(st);
-        st.step = Step::PluginCodex;
+        goto(st, Step::PluginCodex);
         return;
     }
     vibetty_check(st, rt, dir);
@@ -789,13 +792,13 @@ fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                         "broker is 127.0.0.1 but no usable non-loopback IP was found"
                             .into(),
                     );
-                    st.step = Step::RemoteOutside;
+                    goto(st, Step::RemoteOutside);
                 } else {
                     st.pending_broker = Some(url);
                     st.ip_choices = ips;
                     st.pick_lan = false;
                     st.choice = 0;
-                    st.step = Step::IpPick;
+                    goto(st, Step::IpPick);
                 }
                 return;
             }
@@ -804,21 +807,21 @@ fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                     st.log.push(format!("server_url = {url} (from vibetty config)"));
                     st.vibetty_done = true;
                     st.choice = 0;
-                    st.step = Step::Done;
+                    goto(st, Step::Done);
                 }
                 Err(e) => {
                     st.err = Some(format!("{e:#}"));
-                    st.step = Step::RemoteOutside;
+                    goto(st, Step::RemoteOutside);
                 }
             }
         }
         (true, None) => {
             st.choice = 0;
-            st.step = Step::RemoteOutside;
+            goto(st, Step::RemoteOutside);
         }
         (false, _) => {
             st.choice = 0;
-            st.step = Step::InstallVibettyAsk;
+            goto(st, Step::InstallVibettyAsk);
         }
     }
 }
@@ -839,7 +842,7 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
             st.watch_done = true;
         }
         st.choice = 0;
-        st.step = Step::Done;
+        goto(st, Step::Done);
         return;
     }
     if let Err(e) = set_vibetty_broker(vibetty_url) {
@@ -851,7 +854,7 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
         st.watch_done = true;
     }
     st.choice = 0;
-    st.step = Step::Done;
+    goto(st, Step::Done);
 }
 
 /// 进任何表单步骤前复位输入状态(防 field2/旧文本残留)。
@@ -859,6 +862,41 @@ fn prep_form(st: &mut WizardState) {
     st.input = Input::default();
     st.input2 = Input::default();
     st.field2 = false;
+}
+
+/// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤自动重置输入。
+fn goto(st: &mut WizardState, step: Step) {
+    st.history.push(st.step.clone());
+    st.choice = 0;
+    st.err = None;
+    if matches!(
+        step,
+        Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
+    ) {
+        prep_form(st);
+    }
+    st.step = step;
+}
+
+/// 返回上一步(历史栈弹出)。目标步骤的进入效果:Scan 重扫,表单重置。
+fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
+    let Some(prev) = st.history.pop() else {
+        return;
+    };
+    st.choice = 0;
+    st.err = None;
+    if prev == Step::Scan {
+        goto(st, Step::Scan);
+        kick_scan(st, rt);
+    } else {
+        if matches!(
+            prev,
+            Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
+        ) {
+            prep_form(st);
+        }
+        st.step = prev;
+    }
 }
 
 pub struct Outcome {
@@ -896,6 +934,17 @@ pub fn wizard_key(
     }
     st.err = None;
 
+    // ⌫ 返回上一步(文本输入步骤里 ⌫ 先用于删字符,在各自分支里处理)。
+    if key.code == KeyCode::Backspace
+        && !matches!(
+            st.step,
+            Step::AsrApi | Step::TailscaleKey | Step::BrokerInput | Step::WifiForm
+        )
+    {
+        back_one(st, rt);
+        return Outcome::none();
+    }
+
     let enter = key.code == KeyCode::Enter;
     let up = key.code == KeyCode::Up;
     let down = key.code == KeyCode::Down;
@@ -909,10 +958,10 @@ pub fn wizard_key(
             } else if enter {
                 if st.choice == 0 {
                     st.device = DeviceKind::VibeKeys;
-                    st.step = Step::Scan;
+                    goto(st, Step::Scan);
                     kick_scan(st, rt);
                 } else {
-                    st.step = Step::WatchAsk;
+                    goto(st, Step::WatchAsk);
                 }
             }
         }
@@ -953,7 +1002,7 @@ pub fn wizard_key(
             } else if enter {
                 if st.choice == 0 {
                     prep_form(st);
-                    st.step = Step::WifiForm;
+                    goto(st, Step::WifiForm);
                 } else {
                     route_after_connect(st, dir);
                 }
@@ -1012,7 +1061,7 @@ pub fn wizard_key(
                     }
                 }
             } else {
-                feed_input(st, key);
+                feed_input(st, rt, key);
             }
         }
 
@@ -1048,7 +1097,7 @@ pub fn wizard_key(
                         st.log.push(format!("keyboard MIC = {binding}"));
                         st.log.push("prefer_builtin_asr = off".into());
                         st.choice = 0;
-                        st.step = Step::VibekeysApp;
+                        goto(st, Step::VibekeysApp);
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
@@ -1085,13 +1134,13 @@ pub fn wizard_key(
                             st.log.push(format!("asr_config = {url}"));
                             st.log.push("prefer_builtin_asr = on".into());
                             st.choice = 0;
-                            st.step = Step::VibekeysApp;
+                            goto(st, Step::VibekeysApp);
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
                     }
                 }
             } else {
-                feed_input(st, key);
+                feed_input(st, rt, key);
             }
         }
 
@@ -1157,10 +1206,10 @@ pub fn wizard_key(
                 } else if st.device == DeviceKind::VibeKeys {
                     // 8 否 → 17(先看完成页,再问手表)
                     st.choice = 0;
-                    st.step = Step::Done;
+                    goto(st, Step::Done);
                 } else {
                     // 手表只有 remote,不装 vibetty 也继续配 broker。
-                    st.step = Step::RemoteOutside;
+                    goto(st, Step::RemoteOutside);
                 }
             }
         }
@@ -1172,7 +1221,7 @@ pub fn wizard_key(
                 st.choice = (st.choice + 1).min(1);
             } else if enter {
                 if st.choice == 0 {
-                    st.step = Step::HasTailscale;
+                    goto(st, Step::HasTailscale);
                 } else {
                     // 14a:局域网模式。多个候选地址就列出来让用户选
                     // (单网卡自动用,不打扰)。
@@ -1196,7 +1245,7 @@ pub fn wizard_key(
                             st.ip_choices = ips;
                             st.pick_lan = true;
                             st.choice = 0;
-                            st.step = Step::IpPick;
+                            goto(st, Step::IpPick);
                         }
                     }
                 }
@@ -1227,11 +1276,13 @@ pub fn wizard_key(
                 st.choice = (st.choice + 1).min(2);
             } else if enter {
                 let pick = st.choice;
-                prep_form(st);
-                match pick {
-                    0 => st.step = Step::TailscaleKey,
-                    _ => st.step = Step::BrokerInput,
-                }
+                goto(st, if pick == 0 {
+                    Step::TailscaleKey
+                } else {
+                    Step::BrokerInput
+                });
+                // BrokerInput 的说明文字按来源区分(1 = emqx)。
+                st.choice = pick;
             }
         }
 
@@ -1257,7 +1308,7 @@ pub fn wizard_key(
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
             } else {
-                feed_input(st, key);
+                feed_input(st, rt, key);
             }
         }
 
@@ -1269,9 +1320,8 @@ pub fn wizard_key(
                 }
             }
             KeyCode::Char('e') => {
+                goto(st, Step::BrokerInput);
                 st.choice = 2;
-                prep_form(st);
-                st.step = Step::BrokerInput;
             }
             _ => {}
         },
@@ -1313,7 +1363,7 @@ pub fn wizard_key(
                         st.choice = 0;
                         st.pending_broker = None;
                         st.ip_choices.clear();
-                        st.step = Step::Done;
+                        goto(st, Step::Done);
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
@@ -1333,7 +1383,7 @@ pub fn wizard_key(
                 let vibetty_url = url.clone();
                 apply_broker(st, rt, url, &vibetty_url);
             } else {
-                feed_input(st, key);
+                feed_input(st, rt, key);
             }
         }
 
@@ -1344,7 +1394,7 @@ pub fn wizard_key(
                     return Outcome::exit();
                 }
                 st.choice = 0;
-                st.step = Step::WatchAsk;
+                goto(st, Step::WatchAsk);
             }
         }
 
@@ -1357,7 +1407,7 @@ pub fn wizard_key(
             } else if enter {
                 if st.choice == 0 {
                     st.device = DeviceKind::Watch;
-                    st.step = Step::Scan;
+                    goto(st, Step::Scan);
                     kick_scan(st, rt);
                 } else {
                     return Outcome::exit();
@@ -1369,9 +1419,17 @@ pub fn wizard_key(
     Outcome::none()
 }
 
-/// 表单字符输入(field2 决定落在哪个框)。
-fn feed_input(st: &mut WizardState, key: &KeyEvent) {
+/// 表单字符输入(field2 决定落在哪个框)。⌫ 在输入为空时 = 返回上一步。
+fn feed_input(st: &mut WizardState, rt: &mut WizardRuntime, key: &KeyEvent) {
     let second = st.field2;
+    let empty = {
+        let input = if second { &st.input2 } else { &st.input };
+        input.buf.is_empty()
+    };
+    if key.code == KeyCode::Backspace && empty {
+        back_one(st, rt);
+        return;
+    }
     let input = if second { &mut st.input2 } else { &mut st.input };
     match key.code {
         KeyCode::Char(c) => {
@@ -1469,7 +1527,7 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                     st.vibetty_done = true;
                     st.log.push("installed vibetty".into());
                     st.choice = 0;
-                    st.step = Step::RemoteOutside;
+                    goto(st, Step::RemoteOutside);
                 }
                 Some(JobKind::PluginClaude) => {
                     st.log.push(log.trim().to_string());
@@ -1634,7 +1692,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("and configures your device over Bluetooth."),
             ];
             s.body = choices(st, &["Yes — set up my VibeKeys keyboard", "No"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::Scan if st.connecting.is_some() => {
             s.title = "wizard — connecting".into();
@@ -1668,7 +1726,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     .enumerate()
                     .map(|(i, dev)| option_line(dev.name.clone(), i == st.pick_sel))
                     .collect();
-                s.hint = vec![hint_line("↑↓ choose · Enter connect · Esc quit")];
+                s.hint = vec![hint_line("↑↓ choose · Enter connect · ⌫ back · Esc quit")];
             }
         }
         Step::WifiAsk => {
@@ -1678,7 +1736,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 dim_text("It needs WiFi to reach the broker."),
             ];
             s.body = choices(st, &["Yes — add a network", "Skip"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::WifiForm => {
             s.title = "wizard — wifi".into();
@@ -1687,7 +1745,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 field_line("ssid", &st.input, !st.field2),
                 field_line("password", &st.input2, st.field2),
             ];
-            s.hint = vec![hint_line("Tab switch field · Enter save · Esc quit")];
+            s.hint = vec![hint_line("Tab field · Enter save · ⌫ back (empty) · Esc quit")];
         }
         Step::InputMethod => {
             s.title = "wizard — input method".into();
@@ -1699,7 +1757,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     "Whisper-compatible API — keyboard does ASR",
                 ],
             );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::HotkeyCapture => {
             s.title = "wizard — input method hotkey".into();
@@ -1713,9 +1771,9 @@ fn step_screen(st: &WizardState) -> Screen {
                 Style::new().light_blue().bold(),
             ))];
             s.hint = vec![if st.captured.is_some() {
-                hint_line("Enter confirm · any other key re-capture · Esc quit")
+                hint_line("Enter confirm · any other key re-capture · ⌫ back · Esc quit")
             } else {
-                hint_line("e.g. Ctrl+Space — press it now · Esc quit")
+                hint_line("e.g. Ctrl+Space — press it now · ⌫ back · Esc quit")
             }];
         }
         Step::AsrApi => {
@@ -1725,7 +1783,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 field_line("url", &st.input, !st.field2),
                 field_line("api-key", &st.input2, st.field2),
             ];
-            s.hint = vec![hint_line("Tab switch field · Enter save · Esc quit")];
+            s.hint = vec![hint_line("Tab field · Enter save · ⌫ back (empty) · Esc quit")];
         }
         Step::VibekeysApp => {
             s.title = "wizard — agent monitoring".into();
@@ -1737,7 +1795,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 st,
                 &["Yes — install vibekeys + agent plugin", "Skip"],
             );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::PluginClaude | Step::PluginCodex => {
             let (cli, action, label) = if st.step == Step::PluginClaude {
@@ -1760,7 +1818,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 Line::from(""),
             ];
             s.body.extend(choices(st, &["Yes — run the commands", "Skip"]));
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::InstallVibettyAsk => {
             s.title = "wizard — vibetty".into();
@@ -1771,19 +1829,19 @@ fn step_screen(st: &WizardState) -> Screen {
                 "Skip (continue anyway)"
             };
             s.body = choices(st, &["Yes — install vibetty", skip]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::RemoteOutside => {
             s.title = "wizard — remote mode".into();
             s.text = vec![text_line("Will you use remote mode outside the LAN?")];
             s.body = choices(st, &["Yes — outside LAN", "No — LAN only"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::HasTailscale => {
             s.title = "wizard — tailscale".into();
             s.text = vec![text_line("Do you have a Tailscale account?")];
             s.body = choices(st, &["Yes", "No — help me choose"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::BrokerChoice => {
             s.title = "wizard — broker".into();
@@ -1799,7 +1857,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     "I have my own broker (self-hosted)",
                 ],
             );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::TailscaleKey => {
             s.title = "wizard — tailscale auth key".into();
@@ -1816,7 +1874,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("3. Paste the key below:"),
             ];
             s.body = vec![field_line("auth-key", &st.input, true)];
-            s.hint = vec![hint_line("Enter send to device · Esc quit")];
+            s.hint = vec![hint_line("Enter send · ⌫ back (empty) · Esc quit")];
         }
         Step::IpPick => {
             s.title = "wizard — broker host".into();
@@ -1841,7 +1899,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     option_line(broker_with_host(&base, ip), i == st.choice)
                 })
                 .collect();
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
         Step::TailscaleIp => {
             // 只有查不到 ip 才会停留在这个屏(查到直接落 broker 去总结)。
@@ -1852,7 +1910,7 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![];
             s.hint = vec![
-                hint_line("Enter/r retry · e enter broker manually · Esc quit"),
+                hint_line("Enter/r retry · e broker · ⌫ back · Esc quit"),
             ];
         }
         Step::BrokerInput => {
@@ -1866,7 +1924,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 vec![text_line("Enter your broker's address:")]
             };
             s.body = vec![field_line("broker", &st.input, true)];
-            s.hint = vec![hint_line("Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("Enter confirm · ⌫ back · Esc quit")];
         }
         Step::Done => {
             s.title = "wizard — done".into();
@@ -1893,7 +1951,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 "Keyboard setup is complete. Configure the VibeWatch next?",
             )];
             s.body = choices(st, &["Yes — configure the VibeWatch", "No — finish"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
         }
     }
     s
