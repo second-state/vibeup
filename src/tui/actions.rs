@@ -1159,13 +1159,6 @@ pub fn handle_key(
                 // install/uninstall 写了 pkg.message;uninstall 还触发了刷新需求。
                 return KeyOutcome::msg(std::mem::take(&mut pkg.message));
             }
-            // 这里已无弹窗/菜单可关闭,Esc = 退出应用。
-            KeyCode::Esc => {
-                return KeyOutcome {
-                    message: None,
-                    exit: true,
-                };
-            }
             _ => {}
         }
         return KeyOutcome::msg(std::mem::take(&mut pkg.message));

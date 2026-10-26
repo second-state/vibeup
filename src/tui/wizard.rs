@@ -107,8 +107,6 @@ pub struct WizardState {
     pub input: Input,
     pub input2: Input,
     pub field2: bool,
-    /// 步骤 4 捕捉到的快捷键。
-    pub captured: Option<String>,
     /// Some(label) = 后台任务进行中,吞掉按键。
     pub busy: Option<String>,
     pub job_kind: Option<JobKind>,
@@ -156,7 +154,6 @@ impl WizardState {
             input: Input::default(),
             input2: Input::default(),
             field2: false,
-            captured: None,
             busy: None,
             job_kind: None,
             progress: None,
@@ -944,7 +941,11 @@ pub fn wizard_key(
     if key.code == KeyCode::Backspace
         && !matches!(
             st.step,
-            Step::AsrApi | Step::TailscaleKey | Step::BrokerInput | Step::WifiForm
+            Step::AsrApi
+                | Step::TailscaleKey
+                | Step::BrokerInput
+                | Step::WifiForm
+                | Step::HotkeyCapture
         )
     {
         back_one(st, rt);
@@ -1080,23 +1081,22 @@ pub fn wizard_key(
                 st.choice = (st.choice + 1).min(1);
             } else if enter {
                 let local = st.choice == 0;
-                st.input = Input::default();
-                st.input2 = Input::default();
-                st.field2 = false;
-                st.captured = None;
-                st.step = if local {
-                    Step::HotkeyCapture
+                prep_form(st);
+                if local {
+                    goto(st, Step::HotkeyCapture);
                 } else {
-                    Step::AsrApi
-                };
+                    goto(st, Step::AsrApi);
+                }
             }
         }
 
         Step::HotkeyCapture => {
             if enter {
-                let Some(binding) = st.captured.clone() else {
+                let binding = st.input.buf.trim().to_string();
+                if binding.is_empty() {
+                    st.err = Some("press a key combo or type a binding first".into());
                     return Outcome::none();
-                };
+                }
                 let res = wiz_write_keymap(rt, "MIC", &binding).and_then(|()| {
                     wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(false))
                 });
@@ -1109,8 +1109,39 @@ pub fn wizard_key(
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
-            } else if let Some(binding) = key_event_binding(key) {
-                st.captured = Some(binding);
+            } else {
+                // 与 TUI keymap 编辑同款:普通字符打字;Ctrl/Alt+字母整体
+                // 捕捉为组合文本(Ctrl+A);特殊键(F1/方向键/Space)也捕捉。
+                match key.code {
+                    KeyCode::Char(c)
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META) =>
+                    {
+                        let mut combo = String::new();
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            combo.push_str("Ctrl+");
+                        }
+                        if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META) {
+                            combo.push_str("Alt+");
+                        }
+                        combo.push(c.to_ascii_uppercase());
+                        st.input = super::state::Input::with_str(&combo);
+                    }
+                    KeyCode::Backspace => {
+                        if st.input.buf.is_empty() {
+                            back_one(st, rt);
+                        } else {
+                            st.input.backspace();
+                        }
+                    }
+                    KeyCode::Char(c) => st.input.insert(c),
+                    _ => {
+                        if let Some(b) = key_event_binding(key) {
+                            st.input = super::state::Input::with_str(&b);
+                        }
+                    }
+                }
             }
         }
 
@@ -1780,19 +1811,15 @@ fn step_screen(st: &WizardState) -> Screen {
         }
         Step::HotkeyCapture => {
             s.title = "wizard — input method hotkey".into();
-            s.text = vec![text_line("What is your IME hotkey?")];
-            let captured = st
-                .captured
-                .clone()
-                .unwrap_or_else(|| "…press a key combo".into());
-            s.body = vec![Line::from(Span::styled(
-                format!("  {captured}  "),
-                Style::new().light_blue().bold(),
-            ))];
-            s.hint = vec![if st.captured.is_some() {
-                hint_line("Enter confirm · any other key re-capture · ⌫ back · Esc quit")
+            s.text = vec![
+                text_line("Type your IME hotkey, or press a key combo:"),
+                dim_text("type like ctrl+shift · press like Ctrl+A · F1/arrows too"),
+            ];
+            s.body = vec![field_line("hotkey", &st.input, true)];
+            s.hint = vec![if st.input.buf.is_empty() {
+                hint_line("type or press · Enter confirm · ⌫ back · Esc quit")
             } else {
-                hint_line("e.g. Ctrl+Space — press it now · ⌫ back · Esc quit")
+                hint_line("Enter confirm · Backspace edit · ⌫ back (empty) · Esc quit")
             }];
         }
         Step::AsrApi => {
