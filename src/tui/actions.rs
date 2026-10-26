@@ -1068,6 +1068,13 @@ pub fn handle_key(
                 switch_to(&mut tab, next, keys, watch);
                 return KeyOutcome::msg(tab_message(next));
             }
+            // 这里已无弹窗/编辑可关闭,Esc = 退出应用。
+            KeyCode::Esc => {
+                return KeyOutcome {
+                    message: None,
+                    exit: true,
+                };
+            }
             _ => {}
         }
         match code {
@@ -1152,6 +1159,13 @@ pub fn handle_key(
                 // install/uninstall 写了 pkg.message;uninstall 还触发了刷新需求。
                 return KeyOutcome::msg(std::mem::take(&mut pkg.message));
             }
+            // 这里已无弹窗/菜单可关闭,Esc = 退出应用。
+            KeyCode::Esc => {
+                return KeyOutcome {
+                    message: None,
+                    exit: true,
+                };
+            }
             _ => {}
         }
         return KeyOutcome::msg(std::mem::take(&mut pkg.message));
@@ -1163,6 +1177,14 @@ pub fn handle_key(
 
     // ---- 全局键 ----
     match code {
+        // Esc 能关的层(弹窗/编辑/菜单)在上面各分支已消费;走到这里
+        // 说明没有可关闭的东西 → 退出应用。
+        KeyCode::Esc => {
+            return KeyOutcome {
+                message: None,
+                exit: true,
+            };
+        }
         KeyCode::Char('1') => {
             switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
             return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
@@ -1227,10 +1249,14 @@ pub fn handle_key(
 
 fn tab_message(t: super::state::Tab) -> String {
     match t {
-        super::state::Tab::Keyboard => "vibekeys — Enter run/edit · r re-read config".into(),
-        super::state::Tab::Watch => "watch — Enter run/edit · r re-read config".into(),
+        super::state::Tab::Keyboard => {
+            "vibekeys — Enter run/edit · r re-read config · Esc quit".into()
+        }
+        super::state::Tab::Watch => {
+            "watch — Enter run/edit · r re-read config · Esc quit".into()
+        }
         super::state::Tab::Packages => {
-            "packages — Enter actions · u update · U all · p prerelease".into()
+            "packages — Enter actions · u update · U all · p prerelease · Esc quit".into()
         }
     }
 }

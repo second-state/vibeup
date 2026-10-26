@@ -64,7 +64,8 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
-    let mut message = hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions".to_string());
+    let mut message =
+        hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions · Esc quit".to_string());
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
