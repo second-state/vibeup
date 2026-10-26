@@ -1249,7 +1249,8 @@ fn tab_message(t: super::state::Tab) -> String {
             "watch — Enter run/edit · r re-read config · Esc quit".into()
         }
         super::state::Tab::Packages => {
-            "packages — Enter actions · u update · U all · p prerelease · Esc quit".into()
+            "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
+                .into()
         }
     }
 }

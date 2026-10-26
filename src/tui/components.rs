@@ -235,6 +235,20 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 return EventResult::Consumed;
             }
 
+            // Packages 页按 w:进入引导配置(同新用户弹窗的 Yes)。
+            if key.code == KeyCode::Char('w')
+                && mode.get() == Mode::Tabs
+                && tab.get() == Tab::Packages
+                && !pkg.read().menu.is_some()
+                && !pkg.read().running
+            {
+                *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
+                let wrt_arc = wiz_rt.read().clone();
+                *wrt_arc.lock().unwrap() = super::wizard::WizardRuntime::default();
+                mode.set_no_update(Mode::Wizard);
+                return EventResult::Consumed;
+            }
+
             let rts_arc = runtimes.read().clone();
             let mut rts = rts_arc.lock().unwrap();
             let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
