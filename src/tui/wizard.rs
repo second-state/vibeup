@@ -1831,8 +1831,11 @@ fn step_screen(st: &WizardState) -> Screen {
         Step::HotkeyCapture => {
             s.title = "wizard — input method hotkey".into();
             s.text = vec![
-                text_line("Type your IME hotkey, or press a key combo:"),
-                dim_text("type like ctrl+shift · press like Ctrl+A · F1/arrows too"),
+                text_line("Type your IME hotkey, or press a key combo."),
+                dim_text("modifiers: ctrl · shift · alt · meta/win/super"),
+                dim_text("special: delete esc tab space enter f1-f12 home end"),
+                dim_text("combos: ctrl+x alt+f5 · \"text\" = text macro"),
+                dim_text("tui limits: bare ctrl/alt can't be captured — type them"),
             ];
             s.body = vec![field_line("hotkey", &st.input, true)];
             s.hint = vec![if st.input.buf.is_empty() {
@@ -2062,8 +2065,9 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
             + 4;
         let w = W_TEXT.max(content_w).clamp(40, 100).min(area.width.saturating_sub(2));
         let h_text = H_TEXT_INNER.max(scr.text.len() as u16) + 2;
+        // hint 嵌在下边框,不占内容行。
         let h_body = if has_body {
-            (scr.body.len() + scr.hint.len()) as u16 + 2
+            scr.body.len() as u16 + 2
         } else {
             0
         };
@@ -2074,28 +2078,28 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
         }
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(total)) / 2;
+        let bottom = scr.hint.first().cloned();
 
-        // 说明框(title 框)。
+        // 说明框(title 框)。无操作框时,hint 落在它的下边框。
         let rect1 = Rect { x, y, width: w, height: h_text };
         draw_box(
             rect1,
             &format!(" {} ", scr.title),
             &scr.text,
             scr.alert,
+            if has_body { None } else { bottom.clone() },
             buf,
         );
 
-        // 操作框(选项/输入 + hint)。
+        // 操作框(选项/输入),hint 嵌下边框。
         if has_body {
-            let mut lines = scr.body.clone();
-            lines.extend(scr.hint.iter().cloned());
             let rect2 = Rect {
                 x,
                 y: y + h_text + gap,
                 width: w,
                 height: h_body,
             };
-            draw_box(rect2, "", &lines, false, buf);
+            draw_box(rect2, "", &scr.body, false, bottom, buf);
         }
     }
 }
@@ -2105,6 +2109,7 @@ fn draw_box(
     title: &str,
     lines: &[Line<'_>],
     alert: bool,
+    bottom: Option<Line<'static>>,
     buf: &mut ratatui_kit::ratatui::buffer::Buffer,
 ) {
     let border_style = if alert { err_style() } else { Style::new() };
@@ -2115,6 +2120,10 @@ fn draw_box(
             title.to_string(),
             border_style.add_modifier(Modifier::BOLD),
         ));
+    }
+    if let Some(b) = bottom {
+        // 操作提示嵌在下边框(dim),不占内容行。
+        block = block.title_bottom(b.style(Style::new().dark_gray()));
     }
     let inner = block.inner(rect);
     Clear.render(rect, buf);

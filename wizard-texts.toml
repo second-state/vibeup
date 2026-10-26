@@ -84,10 +84,12 @@ hint = "↑↓ choose · Enter confirm · Esc quit"
 # ── 步骤 4:捕捉输入法快捷键 ─────────────────────────────────
 [hotkey]
 title = "wizard — input method hotkey"
-text = "What is your IME hotkey?"
-placeholder = "…press a key combo"
-hint_before = "e.g. Ctrl+Space — press it now · Esc quit"
-hint_after = "Enter confirm · any other key re-capture · Esc quit"
+text = "Type your IME hotkey, or press a key combo:"
+text_special_1 = "special: delete esc tab space enter f1-f12 arrows home end"
+text_combos = "combos: ctrl+x alt+f5 · \"text\" = text macro"
+hint_empty = "type or press · Enter confirm · Esc quit"
+hint_filled = "Enter confirm · Backspace edit · Esc quit"
+error_empty = "press a key combo or type a binding first"
 # 写入成功后的总结行
 log_mic = "keyboard MIC = {binding}"
 log_prefer_off = "prefer_builtin_asr = off"
