@@ -118,8 +118,8 @@ pub struct WizardState {
     pub spin: usize,
     /// 步骤 13 查到的本机 tailscale ip。
     pub ts_ip: Option<String>,
-    /// 已完成的配置项(步骤 17/21 总结)。
-    pub log: Vec<String>,
+    /// 已完成的配置项(步骤 17/21 总结)。bool = 是否成功(失败红色 ✗)。
+    pub log: Vec<(String, bool)>,
     /// 手表已配置完。
     pub watch_done: bool,
     /// vibetty 已就绪(本来就有或本次装的)。
@@ -137,6 +137,11 @@ pub struct WizardState {
 }
 
 impl WizardState {
+    /// 推一条总结行(ok = 绿 ✓,否则红 ✗)。
+    pub fn log_line(&mut self, text: impl Into<String>, ok: bool) {
+        self.log.push((text.into(), ok));
+    }
+
     pub fn new(demo: bool, dry_run: bool) -> Self {
         Self {
             demo,
@@ -729,7 +734,7 @@ fn demo_install_plugin(label: &str, sink: &SharedLines) -> String {
 
 /// 连接成功后的分流:键盘 → 输入方式;手表 → 确保 vibetty → remote 询问。
 fn after_connect(st: &mut WizardState) {
-    st.log.push(format!("connected to {}", st.device.name()));
+    st.log_line(format!("connected to {}", st.device.name()), true);
     // 连上先问 WiFi(键盘/手表都需要),再走各自的后续。
     st.choice = 0;
     prep_form(st);
@@ -804,7 +809,7 @@ fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             }
             match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                 Ok(()) => {
-                    st.log.push(format!("server_url = {url} (from vibetty config)"));
+                    st.log_line(format!("server_url = {url} (from vibetty config)"), true);
                     st.vibetty_done = true;
                     st.choice = 0;
                     goto(st, Step::Done);
@@ -832,12 +837,13 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
         st.err = Some(format!("{e:#}"));
         return;
     }
-    st.log
-        .push(format!("{} server_url = {device_url}", st.device.name()));
+    st.log_line(
+        format!("{} server_url = {device_url}", st.device.name()),
+        true,
+    );
     if st.demo {
         // demo:不碰真机文件。
-        st.log
-            .push(format!("vibetty broker = {vibetty_url} (demo)"));
+        st.log_line(format!("vibetty broker = {vibetty_url} (demo)"), true);
         if st.device != DeviceKind::VibeKeys {
             st.watch_done = true;
         }
@@ -849,7 +855,7 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
         st.err = Some(format!("vibetty config: {e:#}"));
         return;
     }
-    st.log.push(format!("vibetty broker = {vibetty_url}"));
+    st.log_line(format!("vibetty broker = {vibetty_url}"), true);
     if st.device != DeviceKind::VibeKeys {
         st.watch_done = true;
     }
@@ -1053,8 +1059,10 @@ pub fn wizard_key(
                     );
                     match res {
                         Ok(()) => {
-                            st.log
-                                .push(format!("wifi `{ssid}' saved ({n}/{})", ble::MAX_WIFI_CREDS));
+                            st.log_line(
+                                format!("wifi `{ssid}' saved ({n}/{})", ble::MAX_WIFI_CREDS),
+                                true,
+                            );
                             route_after_connect(st, dir);
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
@@ -1094,8 +1102,8 @@ pub fn wizard_key(
                 });
                 match res {
                     Ok(()) => {
-                        st.log.push(format!("keyboard MIC = {binding}"));
-                        st.log.push("prefer_builtin_asr = off".into());
+                        st.log_line(format!("keyboard MIC = {binding}"), true);
+                        st.log_line("prefer_builtin_asr = off", true);
                         st.choice = 0;
                         goto(st, Step::VibekeysApp);
                     }
@@ -1131,8 +1139,8 @@ pub fn wizard_key(
                     });
                     match res {
                         Ok(()) => {
-                            st.log.push(format!("asr_config = {url}"));
-                            st.log.push("prefer_builtin_asr = on".into());
+                            st.log_line(format!("asr_config = {url}"), true);
+                            st.log_line("prefer_builtin_asr = on", true);
                             st.choice = 0;
                             goto(st, Step::VibekeysApp);
                         }
@@ -1153,7 +1161,7 @@ pub fn wizard_key(
                 if st.choice == 0 {
                     start_install(st, rt, JobKind::InstallVibekeys);
                 } else {
-                    st.log.push("skipped vibekeys".into());
+                    st.log_line("skipped vibekeys", true);
                     vibetty_check(st, rt, dir);
                 }
             }
@@ -1189,7 +1197,7 @@ pub fn wizard_key(
                         WizOut::Installed(Ok(res))
                     }));
                 } else {
-                    st.log.push(format!("{label} plugin skipped"));
+                    st.log_line(format!("{label} plugin skipped"), true);
                     plugin_next(st, rt, dir);
                 }
             }
@@ -1295,7 +1303,7 @@ pub fn wizard_key(
                 }
                 match wiz_write_field(st, rt, "tailscale_key", serde_json::json!(key)) {
                     Ok(()) => {
-                        st.log.push("tailscale auth key written to device".into());
+                        st.log_line("tailscale auth key written to device", true);
                         // 13:立刻查本机 tailscale ip;查到直接落 broker。
                         st.ts_ip = tailscale_ip();
                         match st.ts_ip.clone() {
@@ -1351,11 +1359,12 @@ pub fn wizard_key(
                                 return Outcome::none();
                             }
                         }
-                        st.log
-                            .push(format!("{} server_url = {url}", st.device.name()));
+                        st.log_line(
+                            format!("{} server_url = {url}", st.device.name()),
+                            true,
+                        );
                         if st.pick_lan {
-                            st.log
-                                .push(format!("vibetty broker = {vibetty_url}"));
+                            st.log_line(format!("vibetty broker = {vibetty_url}"), true);
                         }
                         if st.device != DeviceKind::VibeKeys {
                             st.watch_done = true;
@@ -1513,29 +1522,39 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             }
             Some(WizOut::Installed(Ok(log))) => match kind {
                 Some(JobKind::InstallVibekeys) => {
-                    st.log.push("installed vibekeys".into());
+                    st.log_line("installed vibekeys", true);
                     // install-script 的结果(jump 脚本)进总结页。
                     for line in log.lines() {
                         let t = line.trim();
-                        if t.contains("jump script") || t.starts_with("install-script failed") {
-                            st.log.push(t.to_string());
+                        let failed = t.starts_with("install-script failed");
+                        if t.contains("jump script") || failed {
+                            st.log_line(t.to_string(), !failed);
                         }
                     }
                     plugin_next(st, rt, dir);
                 }
                 Some(JobKind::InstallVibetty) => {
                     st.vibetty_done = true;
-                    st.log.push("installed vibetty".into());
+                    st.log_line("installed vibetty", true);
                     st.choice = 0;
                     goto(st, Step::RemoteOutside);
                 }
                 Some(JobKind::PluginClaude) => {
-                    st.log.push(log.trim().to_string());
-                    plugin_next(st, rt, dir);
+                    // 失败:留在本步,Enter 重试 / Skip 跳过(跳过才记失败行)。
+                    if log.contains("install failed") {
+                        st.err = Some(log.trim().to_string());
+                    } else {
+                        st.log_line(log.trim(), true);
+                        plugin_next(st, rt, dir);
+                    }
                 }
                 Some(JobKind::PluginCodex) => {
-                    st.log.push(log.trim().to_string());
-                    vibetty_check(st, rt, dir);
+                    if log.contains("install failed") {
+                        st.err = Some(log.trim().to_string());
+                    } else {
+                        st.log_line(log.trim(), true);
+                        vibetty_check(st, rt, dir);
+                    }
                 }
                 _ => {}
             },
@@ -1934,11 +1953,13 @@ fn step_screen(st: &WizardState) -> Screen {
                 s.text = st
                     .log
                     .iter()
-                    .map(|l| {
-                        Line::from(Span::styled(
-                            format!("✓ {l}"),
-                            Style::new().green(),
-                        ))
+                    .map(|(l, ok)| {
+                        let (mark, style) = if *ok {
+                            ("✓", Style::new().green())
+                        } else {
+                            ("✗", Style::new().red())
+                        };
+                        Line::from(Span::styled(format!("{mark} {l}"), style))
                     })
                     .collect();
             }
