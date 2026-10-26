@@ -882,12 +882,7 @@ pub fn wizard_key(
     dir: &Path,
 ) -> Outcome {
     // 退出优先;文本输入步骤里 q 是普通字符(Ctrl-C 始终可退)。
-    let text_step = matches!(
-        st.step,
-        Step::AsrApi | Step::TailscaleKey | Step::BrokerInput
-    );
     if key.code == KeyCode::Esc
-        || (key.code == KeyCode::Char('q') && !text_step)
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
         return Outcome::exit();
@@ -1580,7 +1575,7 @@ fn choices(st: &WizardState, opts: &[&str]) -> Vec<Line<'static>> {
 
 fn step_screen(st: &WizardState) -> Screen {
     let name = st.device.name();
-    let quit: Line<'static> = hint_line("Esc/q quit");
+    let quit: Line<'static> = hint_line("Esc quit");
 
     // 后台任务进行中:进度屏(优先于一切步骤内容)。
     if let Some(label) = &st.busy {

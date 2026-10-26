@@ -986,7 +986,7 @@ pub fn handle_key(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // 退出优先(任何状态都可退)。
-    if code == KeyCode::Char('q') || (code == KeyCode::Char('c') && ctrl) {
+    if code == KeyCode::Char('c') && ctrl {
         return KeyOutcome {
             message: None,
             exit: true,

@@ -228,7 +228,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                             mode.set_no_update(Mode::Wizard);
                         }
                     }
-                    KeyCode::Char('q') | KeyCode::Esc => ask_wizard.set(false),
+                    KeyCode::Esc => ask_wizard.set(false),
                     _ => {}
                 }
                 return EventResult::Consumed;
