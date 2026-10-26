@@ -937,21 +937,6 @@ pub fn wizard_key(
     }
     st.err = None;
 
-    // ⌫ 返回上一步(文本输入步骤里 ⌫ 先用于删字符,在各自分支里处理)。
-    if key.code == KeyCode::Backspace
-        && !matches!(
-            st.step,
-            Step::AsrApi
-                | Step::TailscaleKey
-                | Step::BrokerInput
-                | Step::WifiForm
-                | Step::HotkeyCapture
-        )
-    {
-        back_one(st, rt);
-        return Outcome::none();
-    }
-
     let enter = key.code == KeyCode::Enter;
     let up = key.code == KeyCode::Up;
     let down = key.code == KeyCode::Down;
@@ -975,10 +960,14 @@ pub fn wizard_key(
 
         Step::Scan => {
             if !st.pick.is_empty() {
+                // 最后一项是"← Back"。
                 if up {
                     st.pick_sel = st.pick_sel.saturating_sub(1);
                 } else if down {
-                    st.pick_sel = (st.pick_sel + 1).min(st.pick.len() - 1);
+                    st.pick_sel = (st.pick_sel + 1).min(st.pick.len());
+                } else if enter && st.pick_sel == st.pick.len() {
+                    // Back 选项:返回上一步(不重扫)。
+                    back_one(st, rt);
                 } else if enter {
                     let dev = st.pick[st.pick_sel].clone();
                     st.err = None;
@@ -1005,9 +994,11 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                if st.choice == 0 {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
                     prep_form(st);
                     goto(st, Step::WifiForm);
                 } else {
@@ -1078,13 +1069,15 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                let local = st.choice == 0;
-                prep_form(st);
-                if local {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
+                    prep_form(st);
                     goto(st, Step::HotkeyCapture);
                 } else {
+                    prep_form(st);
                     goto(st, Step::AsrApi);
                 }
             }
@@ -1128,13 +1121,7 @@ pub fn wizard_key(
                         combo.push(c.to_ascii_uppercase());
                         st.input = super::state::Input::with_str(&combo);
                     }
-                    KeyCode::Backspace => {
-                        if st.input.buf.is_empty() {
-                            back_one(st, rt);
-                        } else {
-                            st.input.backspace();
-                        }
-                    }
+                    KeyCode::Backspace => st.input.backspace(),
                     KeyCode::Char(c) => st.input.insert(c),
                     _ => {
                         if let Some(b) = key_event_binding(key) {
@@ -1187,9 +1174,11 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                if st.choice == 0 {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
                     start_install(st, rt, JobKind::InstallVibekeys);
                 } else {
                     st.log_line("skipped vibekeys", true);
@@ -1238,9 +1227,11 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                if st.choice == 0 {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
                     start_install(st, rt, JobKind::InstallVibetty);
                 } else if st.device == DeviceKind::VibeKeys {
                     // 8 否 → 17(先看完成页,再问手表)
@@ -1257,9 +1248,11 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                if st.choice == 0 {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
                     goto(st, Step::HasTailscale);
                 } else {
                     // 14a:局域网模式。多个候选地址就列出来让用户选
@@ -1295,16 +1288,16 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                let has = st.choice == 0;
-                st.choice = 0;
-                prep_form(st);
-                st.step = if has {
-                    Step::TailscaleKey
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
+                    prep_form(st);
+                    goto(st, Step::TailscaleKey);
                 } else {
-                    Step::BrokerChoice
-                };
+                    goto(st, Step::BrokerChoice);
+                }
             }
         }
 
@@ -1312,16 +1305,21 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(2);
+                st.choice = (st.choice + 1).min(3);
             } else if enter {
-                let pick = st.choice;
-                goto(st, if pick == 0 {
-                    Step::TailscaleKey
+                if st.choice == 3 {
+                    back_one(st, rt);
                 } else {
-                    Step::BrokerInput
-                });
-                // BrokerInput 的说明文字按来源区分(1 = emqx)。
-                st.choice = pick;
+                    let pick = st.choice;
+                    prep_form(st);
+                    goto(st, if pick == 0 {
+                        Step::TailscaleKey
+                    } else {
+                        Step::BrokerInput
+                    });
+                    // BrokerInput 的说明文字按来源区分(1 = emqx)。
+                    st.choice = pick;
+                }
             }
         }
 
@@ -1369,7 +1367,10 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(st.ip_choices.len().saturating_sub(1));
+                st.choice = (st.choice + 1).min(st.ip_choices.len());
+            } else if enter && st.choice == st.ip_choices.len() {
+                // Back 选项。
+                back_one(st, rt);
             } else if enter {
                 let Some(ip) = st.ip_choices.get(st.choice).cloned() else {
                     return Outcome::none();
@@ -1443,9 +1444,11 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(1);
+                st.choice = (st.choice + 1).min(2);
             } else if enter {
-                if st.choice == 0 {
+                if st.choice == 2 {
+                    back_one(st, rt);
+                } else if st.choice == 0 {
                     st.device = DeviceKind::Watch;
                     goto(st, Step::Scan);
                     kick_scan(st, rt);
@@ -1674,11 +1677,23 @@ struct Screen {
     alert: bool,
 }
 
+/// 选项列表(不带 Back;需要 Back 的屏用 choices_with_back)。
 fn choices(st: &WizardState, opts: &[&str]) -> Vec<Line<'static>> {
     opts.iter()
         .enumerate()
         .map(|(i, o)| option_line(o.to_string(), i == st.choice))
         .collect()
+}
+
+/// 选项列表 + 末尾统一的"← Back"(所有选择屏一致;Enter 选中即返回上一步)。
+fn choices_with_back(st: &WizardState, opts: &[&str]) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = opts
+        .iter()
+        .enumerate()
+        .map(|(i, o)| option_line(o.to_string(), i == st.choice))
+        .collect();
+    lines.push(option_line("← Back".into(), st.choice == opts.len()));
+    lines
 }
 
 fn step_screen(st: &WizardState) -> Screen {
@@ -1742,7 +1757,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("and configures your device over Bluetooth."),
             ];
             s.body = choices(st, &["Yes — set up my VibeKeys keyboard", "No"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::Scan if st.connecting.is_some() => {
             s.title = "wizard — connecting".into();
@@ -1776,7 +1791,11 @@ fn step_screen(st: &WizardState) -> Screen {
                     .enumerate()
                     .map(|(i, dev)| option_line(dev.name.clone(), i == st.pick_sel))
                     .collect();
-                s.hint = vec![hint_line("↑↓ choose · Enter connect · ⌫ back · Esc quit")];
+                s.body.push(option_line(
+                    "← Back".into(),
+                    st.pick_sel == st.pick.len(),
+                ));
+                s.hint = vec![hint_line("↑↓ choose · Enter connect · Esc quit")];
             }
         }
         Step::WifiAsk => {
@@ -1785,8 +1804,8 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Configure WiFi for this device?"),
                 dim_text("It needs WiFi to reach the broker."),
             ];
-            s.body = choices(st, &["Yes — add a network", "Skip"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes — add a network", "Skip"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::WifiForm => {
             s.title = "wizard — wifi".into();
@@ -1795,19 +1814,19 @@ fn step_screen(st: &WizardState) -> Screen {
                 field_line("ssid", &st.input, !st.field2),
                 field_line("password", &st.input2, st.field2),
             ];
-            s.hint = vec![hint_line("Tab field · Enter save · ⌫ back (empty) · Esc quit")];
+            s.hint = vec![hint_line("Tab field · Enter save · Esc quit")];
         }
         Step::InputMethod => {
             s.title = "wizard — input method".into();
             s.text = vec![text_line("How do you type with the keyboard?")];
-            s.body = choices(
+            s.body = choices_with_back(
                 st,
                 &[
                     "Local input (typeless-like) — uses your IME",
                     "Whisper-compatible API — keyboard does ASR",
                 ],
             );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::HotkeyCapture => {
             s.title = "wizard — input method hotkey".into();
@@ -1817,9 +1836,9 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![field_line("hotkey", &st.input, true)];
             s.hint = vec![if st.input.buf.is_empty() {
-                hint_line("type or press · Enter confirm · ⌫ back · Esc quit")
+                hint_line("type or press · Enter confirm · Esc quit")
             } else {
-                hint_line("Enter confirm · Backspace edit · ⌫ back (empty) · Esc quit")
+                hint_line("Enter confirm · Backspace edit · Esc quit")
             }];
         }
         Step::AsrApi => {
@@ -1829,7 +1848,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 field_line("url", &st.input, !st.field2),
                 field_line("api-key", &st.input2, st.field2),
             ];
-            s.hint = vec![hint_line("Tab field · Enter save · ⌫ back (empty) · Esc quit")];
+            s.hint = vec![hint_line("Tab field · Enter save · Esc quit")];
         }
         Step::VibekeysApp => {
             s.title = "wizard — agent monitoring".into();
@@ -1837,11 +1856,8 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Install vibekeys-app?"),
                 dim_text("It monitors Claude Code / Codex work status on the keyboard."),
             ];
-            s.body = choices(
-                st,
-                &["Yes — install vibekeys + agent plugin", "Skip"],
-            );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes — install vibekeys + agent plugin", "Skip"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::PluginClaude | Step::PluginCodex => {
             let (cli, action, label) = if st.step == Step::PluginClaude {
@@ -1863,8 +1879,8 @@ fn step_screen(st: &WizardState) -> Screen {
                 )),
                 Line::from(""),
             ];
-            s.body.extend(choices(st, &["Yes — run the commands", "Skip"]));
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body.extend(choices_with_back(st, &["Yes — run the commands", "Skip"]));
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::InstallVibettyAsk => {
             s.title = "wizard — vibetty".into();
@@ -1874,20 +1890,20 @@ fn step_screen(st: &WizardState) -> Screen {
             } else {
                 "Skip (continue anyway)"
             };
-            s.body = choices(st, &["Yes — install vibetty", skip]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes — install vibetty", skip]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::RemoteOutside => {
             s.title = "wizard — remote mode".into();
             s.text = vec![text_line("Will you use remote mode outside the LAN?")];
-            s.body = choices(st, &["Yes — outside LAN", "No — LAN only"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes — outside LAN", "No — LAN only"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::HasTailscale => {
             s.title = "wizard — tailscale".into();
             s.text = vec![text_line("Do you have a Tailscale account?")];
-            s.body = choices(st, &["Yes", "No — help me choose"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes", "No — help me choose"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::BrokerChoice => {
             s.title = "wizard — broker".into();
@@ -1895,7 +1911,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Pick a way to reach your machine from outside:"),
                 dim_text("EMQX Cloud is free up to 1 GB/month."),
             ];
-            s.body = choices(
+            s.body = choices_with_back(
                 st,
                 &[
                     "Sign up for Tailscale (free, private network)",
@@ -1903,7 +1919,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     "I have my own broker (self-hosted)",
                 ],
             );
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::TailscaleKey => {
             s.title = "wizard — tailscale auth key".into();
@@ -1920,7 +1936,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("3. Paste the key below:"),
             ];
             s.body = vec![field_line("auth-key", &st.input, true)];
-            s.hint = vec![hint_line("Enter send · ⌫ back (empty) · Esc quit")];
+            s.hint = vec![hint_line("Enter send · Esc quit")];
         }
         Step::IpPick => {
             s.title = "wizard — broker host".into();
@@ -1945,7 +1961,11 @@ fn step_screen(st: &WizardState) -> Screen {
                     option_line(broker_with_host(&base, ip), i == st.choice)
                 })
                 .collect();
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body.push(option_line(
+                "← Back".into(),
+                st.choice == st.ip_choices.len(),
+            ));
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::TailscaleIp => {
             // 只有查不到 ip 才会停留在这个屏(查到直接落 broker 去总结)。
@@ -1956,7 +1976,7 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![];
             s.hint = vec![
-                hint_line("Enter/r retry · e broker · ⌫ back · Esc quit"),
+                hint_line("Enter/r retry · e broker · Esc quit"),
             ];
         }
         Step::BrokerInput => {
@@ -1970,7 +1990,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 vec![text_line("Enter your broker's address:")]
             };
             s.body = vec![field_line("broker", &st.input, true)];
-            s.hint = vec![hint_line("Enter confirm · ⌫ back · Esc quit")];
+            s.hint = vec![hint_line("Enter confirm · Esc quit")];
         }
         Step::Done => {
             s.title = "wizard — done".into();
@@ -1998,8 +2018,8 @@ fn step_screen(st: &WizardState) -> Screen {
             s.text = vec![text_line(
                 "Keyboard setup is complete. Configure the VibeWatch next?",
             )];
-            s.body = choices(st, &["Yes — configure the VibeWatch", "No — finish"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · ⌫ back · Esc quit")];
+            s.body = choices_with_back(st, &["Yes — configure the VibeWatch", "No — finish"]);
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
     }
     s
