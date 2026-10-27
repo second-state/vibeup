@@ -126,8 +126,6 @@ pub struct WizardState {
     /// 16b:vibetty config 里的原 broker(含 loopback host)与本机 IP 候选。
     pub pending_broker: Option<String>,
     pub ip_choices: Vec<String>,
-    /// IP 选择的用途:false = 替换 loopback(16b),true = 局域网模式选网卡(14a)。
-    pub pick_lan: bool,
     /// 走过的步骤栈(⌫ 返回上一步)。
     pub history: Vec<Step>,
     /// plugin 询问已问过(不管答了什么)。
@@ -167,7 +165,6 @@ impl WizardState {
             vibetty_done: false,
             pending_broker: None,
             ip_choices: Vec::new(),
-            pick_lan: false,
             history: Vec::new(),
             plugin_claude_asked: false,
             plugin_codex_asked: false,
@@ -247,30 +244,6 @@ fn vibetty_binary(dir: &Path) -> Option<String> {
     pkg::installed_version(p, dir)
 }
 
-/// `~/.vibetty/config.toml` 里 `[mqtt] broker` 的值。
-pub fn vibetty_broker() -> Option<String> {
-    let path = dirs::home_dir()?.join(".vibetty").join("config.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut in_mqtt = false;
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_mqtt = t.eq_ignore_ascii_case("[mqtt]");
-            continue;
-        }
-        if in_mqtt
-            && let Some((k, v)) = t.split_once('=')
-            && k.trim() == "broker"
-        {
-            let s = v.trim().trim_matches('"').trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// 写 `~/.vibetty/config.toml` 的 `[mqtt] broker`。文件不存在就建;已存在
 /// 则行级替换/插入,保留其余内容(不引 toml 依赖,注释也保得住)。
 pub fn set_vibetty_broker(url: &str) -> anyhow::Result<()> {
@@ -332,22 +305,6 @@ fn tailscale_ip() -> Option<String> {
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
-}
-
-/// broker 的 host 是否指向本机回环(设备够不着)。
-fn is_loopback_broker(url: &str) -> bool {
-    let rest = url.split_once("://").map(|x| x.1).unwrap_or(url);
-    let authority = rest.split(['/', '?']).next().unwrap_or("");
-    let hostport = authority.rsplit('@').next().unwrap_or("");
-    // IPv6 字面量带方括号(如 [::1]:8080);普通 host 直接剥端口。
-    let bare = if let Some(h) = hostport.strip_prefix('[') {
-        h.split(']').next().unwrap_or(h).to_string()
-    } else {
-        hostport.split(':').next().unwrap_or(hostport).to_string()
-    };
-    bare == "127.0.0.1"
-        || bare == "::1"
-        || bare.eq_ignore_ascii_case("localhost")
 }
 
 /// 把 url 的 host 换成 ip,保留 scheme/userinfo/port/路径。
@@ -792,54 +749,16 @@ fn plugin_next(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
 
 /// 步骤 7:vibetty 装配状态分流(二进制与 config 两者都查)。
 /// demo 不查真机,一律当没装,走 8→9→10 完整流程。
-fn vibetty_check(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
-    let (bin, cfg) = if st.demo {
-        (false, None)
+fn vibetty_check(st: &mut WizardState, _rt: &mut WizardRuntime, dir: &Path) {
+    // 只看二进制在不在;broker 怎么落(局域网 / tailscale / 自建)
+    // 一律走 RemoteOutside 询问,不静默复用旧配置。demo 当作没装,
+    // 保住 8→9→10 的完整演示流程。
+    let installed = !st.demo && vibetty_binary(dir).is_some();
+    st.choice = 0;
+    if installed {
+        goto(st, Step::RemoteOutside);
     } else {
-        (vibetty_binary(dir).is_some(), vibetty_broker())
-    };
-    match (bin, cfg) {
-        (true, Some(url)) => {
-            // 16:把 vibetty 现有 broker 通过 ble 发给键盘。
-            // 回环地址设备够不着 → 列出本机 IP 让用户选。
-            if is_loopback_broker(&url) {
-                let ips = local_ips();
-                if ips.is_empty() {
-                    st.err = Some(
-                        "broker is 127.0.0.1 but no usable non-loopback IP was found"
-                            .into(),
-                    );
-                    goto(st, Step::RemoteOutside);
-                } else {
-                    st.pending_broker = Some(url);
-                    st.ip_choices = ips;
-                    st.pick_lan = false;
-                    st.choice = 0;
-                    goto(st, Step::IpPick);
-                }
-                return;
-            }
-            match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
-                Ok(()) => {
-                    st.log_line(format!("server_url = {url} (from vibetty config)"), true);
-                    st.vibetty_done = true;
-                    st.choice = 0;
-                    goto(st, Step::Done);
-                }
-                Err(e) => {
-                    st.err = Some(format!("{e:#}"));
-                    goto(st, Step::RemoteOutside);
-                }
-            }
-        }
-        (true, None) => {
-            st.choice = 0;
-            goto(st, Step::RemoteOutside);
-        }
-        (false, _) => {
-            st.choice = 0;
-            goto(st, Step::InstallVibettyAsk);
-        }
+        goto(st, Step::InstallVibettyAsk);
     }
 }
 
@@ -1090,10 +1009,23 @@ pub fn wizard_key(
             if up {
                 st.choice = st.choice.saturating_sub(1);
             } else if down {
-                st.choice = (st.choice + 1).min(2);
+                st.choice = (st.choice + 1).min(3);
             } else if enter {
-                if st.choice == 2 {
+                if st.choice == 3 {
                     back_one(st, rt);
+                } else if st.choice == 2 {
+                    // 不改 keymap,沿用设备默认热键 ctrl+alt;仍关内置 asr 优先。
+                    let res =
+                        wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(false));
+                    match res {
+                        Ok(()) => {
+                            st.log_line("keyboard MIC = default (ctrl+alt)", true);
+                            st.log_line("prefer_builtin_asr = off", true);
+                            st.choice = 0;
+                            goto(st, Step::VibekeysApp);
+                        }
+                        Err(e) => st.err = Some(format!("{e:#}")),
+                    }
                 } else if st.choice == 0 {
                     prep_form(st);
                     goto(st, Step::HotkeyCapture);
@@ -1300,7 +1232,6 @@ pub fn wizard_key(
                         _ => {
                             st.pending_broker = Some("mqtt://127.0.0.1:1883".into());
                             st.ip_choices = ips;
-                            st.pick_lan = true;
                             st.choice = 0;
                             goto(st, Step::IpPick);
                         }
@@ -1349,7 +1280,23 @@ pub fn wizard_key(
         }
 
         Step::TailscaleKey => {
-            if enter {
+            if up || down {
+                // 0 = 输入框,1 = "已设置过,跳过" 选项。
+                st.choice = 1 - st.choice.min(1);
+            } else if enter {
+                if st.choice == 1 {
+                    // 设备已绑过 key:不再写,直接查本机 tailscale ip 落 broker。
+                    st.log_line("tailscale auth key skipped (already set up)", true);
+                    st.choice = 0;
+                    st.ts_ip = tailscale_ip();
+                    match st.ts_ip.clone() {
+                        Some(ip) => {
+                            apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                        }
+                        None => st.step = Step::TailscaleIp,
+                    }
+                    return Outcome::none();
+                }
                 let key = st.input.buf.trim().to_string();
                 if key.is_empty() {
                     st.err = Some("paste the auth key first".into());
@@ -1359,6 +1306,7 @@ pub fn wizard_key(
                     Ok(()) => {
                         st.log_line("tailscale auth key written to device", true);
                         // 13:立刻查本机 tailscale ip;查到直接落 broker。
+                        st.choice = 0;
                         st.ts_ip = tailscale_ip();
                         match st.ts_ip.clone() {
                             Some(ip) => {
@@ -1403,14 +1351,10 @@ pub fn wizard_key(
                 let base = st.pending_broker.clone().unwrap_or_default();
                 let url = broker_with_host(&base, &ip);
                 // 局域网模式:vibetty config 落 127.0.0.1(它就在本机)。
-                let vibetty_url = if st.pick_lan {
-                    "mqtt://127.0.0.1:1883"
-                } else {
-                    ""
-                };
+                let vibetty_url = "mqtt://127.0.0.1:1883";
                 match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                     Ok(()) => {
-                        if st.pick_lan && !st.demo {
+                        if !st.demo {
                             if let Err(e) = set_vibetty_broker(vibetty_url) {
                                 st.err = Some(format!("vibetty config: {e:#}"));
                                 return Outcome::none();
@@ -1420,9 +1364,7 @@ pub fn wizard_key(
                             format!("{} server_url = {url}", st.device.name()),
                             true,
                         );
-                        if st.pick_lan {
-                            st.log_line(format!("vibetty broker = {vibetty_url}"), true);
-                        }
+                        st.log_line(format!("vibetty broker = {vibetty_url}"), true);
                         if st.device != DeviceKind::VibeKeys {
                             st.watch_done = true;
                         }
@@ -1844,6 +1786,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 &[
                     "Local input (typeless-like) — uses your IME",
                     "Whisper-compatible API — keyboard does ASR",
+                    "Use the default hotkey (ctrl+alt) — no change",
                 ],
             );
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
@@ -1959,23 +1902,21 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("   caches its own node keys."),
                 text_line("3. Paste the key below:"),
             ];
-            s.body = vec![field_line("auth-key", &st.input, true)];
-            s.hint = vec![hint_line("Enter send · Esc quit")];
+            s.body = vec![
+                field_line("auth-key", &st.input, st.choice == 0),
+                option_line(
+                    "Skip — already set up on the device".into(),
+                    st.choice == 1,
+                ),
+            ];
+            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::IpPick => {
             s.title = "wizard — broker host".into();
-            s.text = if st.pick_lan {
-                vec![
-                    text_line("Multiple network interfaces found —"),
-                    dim_text("pick the address the device can reach:"),
-                ]
-            } else {
-                vec![
-                    text_line("Your vibetty broker points at 127.0.0.1 —"),
-                    dim_text("the keyboard can't reach that. Pick this"),
-                    dim_text("machine's address to use instead:"),
-                ]
-            };
+            s.text = vec![
+                text_line("Multiple network interfaces found —"),
+                dim_text("pick the address the device can reach:"),
+            ];
             let base = st.pending_broker.clone().unwrap_or_default();
             s.body = st
                 .ip_choices
@@ -2257,16 +2198,6 @@ mod tests {
         std::fs::create_dir_all(home.join(".vibetty")).unwrap();
         assert!(!is_new_user_in(&bin, &home));
         std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn loopback_detection() {
-        assert!(is_loopback_broker("mqtt://127.0.0.1:1883"));
-        assert!(is_loopback_broker("mqtt://localhost:1883"));
-        assert!(is_loopback_broker("mqtt://LOCALHOST"));
-        assert!(is_loopback_broker("wss://[::1]:8080")); // 简化匹配: host 以 [::1 开头也算? 见实现
-        assert!(!is_loopback_broker("mqtts://abc.emqx.cloud:8883"));
-        assert!(!is_loopback_broker("mqtt://192.168.1.250:1883"));
     }
 
     #[test]

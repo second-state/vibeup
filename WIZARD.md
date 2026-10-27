@@ -137,10 +137,9 @@ cat ~/.vibetty/config.toml              # [mqtt] broker set?
 ```
 
 - vibetty missing → ask, then `vibeup install vibetty`.
-- If a broker is already configured, push it to the device (see step 5) —
-  if it points at `127.0.0.1`/`::1`, replace the host with a reachable
-  address (step 5a) first.
-- Otherwise ask: **"Will you use this outside your LAN?"**
+- vibetty present (whether or not a broker is already configured) → always
+  ask: **"Will you use this outside your LAN?"** — don't silently reuse the
+  old broker; the answer routes 4a or 4b.
 
 #### 4a. LAN only
 
