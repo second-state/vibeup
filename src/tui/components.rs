@@ -668,15 +668,18 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             false,
             name.len() + 34,
         ),
-        Conn::Failed(e) => (
-            " error ".to_string(),
-            vec![
-                Line::from(Span::styled(format!(" ✗ {e}"), err_style())),
-                Line::from(Span::styled(" Enter/r retry", dim())),
-            ],
-            true,
-            40,
-        ),
+        Conn::Failed(e) => {
+            // 长错误按词折行;✗ 只标首行,操作提示在 footer。
+            let lines: Vec<Line> = super::state::wrap_words(e, 34)
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let mark = if i == 0 { " ✗ " } else { "   " };
+                    Line::from(Span::styled(format!("{mark}{l}"), err_style()))
+                })
+                .collect();
+            (" error ".to_string(), lines, true, 40)
+        }
         Conn::Disconnected => (
             " disconnected ".to_string(),
             vec![

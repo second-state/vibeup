@@ -553,6 +553,30 @@ pub fn short_status(s: &str) -> &str {
     }
 }
 
+/// 按词折行(空格分词),长句适配固定框宽;超长单词硬放一行。
+pub fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for word in s.split_whitespace() {
+        let w = word.chars().count();
+        if !cur.is_empty() && cur_w + 1 + w > width {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+            cur_w += 1;
+        }
+        cur.push_str(word);
+        cur_w += w;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Packages 页回车弹出的动作菜单:打开时锁定的包下标 + 菜单光标。
 #[derive(Clone)]
 pub struct PkgMenu {

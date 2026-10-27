@@ -492,12 +492,12 @@ fn on_scan_result(state: &mut DeviceState, res: anyhow::Result<Vec<FoundDevice>>
         }
         Ok(_) => {
             state.conn = Conn::Failed("no devices found".into());
-            "no devices found".into()
+            "Enter/r retry".into()
         }
         Err(e) => {
             let msg = format!("{e:#}");
             state.conn = Conn::Failed(msg.clone());
-            msg
+            "Enter/r retry".into()
         }
     }
 }
@@ -1046,6 +1046,20 @@ pub fn handle_key(
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let demo = state.demo;
+            // 错误页:Esc = 退出应用(与主页面一致);Enter/r = 重扫。
+            // Pick 页:Esc = 退出应用(r = 重扫)。
+            // 菜单页:无可关闭的东西,Esc = 退出应用。
+            if key.code == KeyCode::Esc
+                && matches!(
+                    state.conn,
+                    Conn::Failed(_) | Conn::Pick | Conn::Fresh | Conn::Menu
+                )
+            {
+                return KeyOutcome {
+                    message: None,
+                    exit: true,
+                };
+            }
             device_flow_key(state, rt, demo, code, &mut message);
             return KeyOutcome::msg(std::mem::take(&mut message));
         }
@@ -1483,7 +1497,7 @@ fn device_flow_key(
             state.pick_sel = state.pick_sel.saturating_sub(1);
         }
         (Flow::Pick, KeyCode::Enter) => pick_connect(state, rt, demo),
-        (Flow::Pick, KeyCode::Char('r') | KeyCode::Esc) => start_scan(state, rt, demo),
+        (Flow::Pick, KeyCode::Char('r')) => start_scan(state, rt, demo),
         (Flow::Connecting, KeyCode::Esc) => {
             // 弃掉连接任务/会话,回列表;设备也许还在广播,重连再试即可。
             rt.job = None;

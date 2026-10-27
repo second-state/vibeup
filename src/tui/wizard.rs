@@ -7,7 +7,7 @@
 
 use super::actions::scan_devices_thread;
 use super::demo;
-use super::state::{DownloadProgress, Input, SharedProgress};
+use super::state::{wrap_words, DownloadProgress, Input, SharedProgress};
 use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
 use crate::install;
@@ -1729,12 +1729,22 @@ fn step_screen(st: &WizardState) -> Screen {
     }
 
     if let Some(err) = &st.err {
+        // 长错误按词折行,避免固定框宽截断。
+        let mut text: Vec<Line> = wrap_words(err, 50)
+            .iter()
+            .map(|l| {
+                Line::from(Span::styled(
+                    format!(" {l} "),
+                    err_style().bold(),
+                ))
+            })
+            .collect();
+        if text.is_empty() {
+            text.push(Line::from(""));
+        }
         return Screen {
             title: "wizard".into(),
-            text: vec![Line::from(Span::styled(
-                format!(" {err} "),
-                err_style().bold(),
-            ))],
+            text,
             body: vec![],
             hint: vec![quit],
             alert: true,
