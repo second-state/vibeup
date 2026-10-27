@@ -251,10 +251,10 @@ Center and retry.
 ## Appendix: the interactive wizard
 
 Everything above is also automated by `vibeup wizard`, an interactive TUI
-for users who set things up themselves: it scans and connects over BLE,
-asks the same questions (device kind → WiFi → input method → vibekeys +
-plugins → vibetty → LAN/Tailscale/EMQX/self-hosted broker → watch), and
-ends with a ✓/✗ summary page. Users reach it via `vibeup wizard`, the `w`
+for users who set things up themselves: it asks up front which device to
+set up (keyboard or watch), then scans and connects over BLE and walks the
+same questions (WiFi → input method → vibekeys + plugins → vibetty →
+LAN/Tailscale/EMQX/self-hosted broker), ending with a ✓/✗ summary page. Users reach it via `vibeup wizard`, the `w`
 key in the TUI's Packages tab, or an auto-popup on first run (nothing
 installed yet). It supports `--demo` to walk the whole flow with fake
 hardware. Agents should not send users here — run the commands above

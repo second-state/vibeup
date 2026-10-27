@@ -32,7 +32,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Step {
-    /// 1:要设置的是不是键盘
+    /// 1:这次配置哪个设备(键盘 or 手表)
     IsKeyboard,
     /// 2/18:扫描 → 挑选 → 连接(device 指明键盘还是手表)
     Scan,
@@ -68,10 +68,8 @@ pub enum Step {
     BrokerInput,
     /// 14a/16b:多个本机地址时让用户选(回环替换 / 局域网模式)
     IpPick,
-    /// 17:配置完成确认页(✓ 总结,Enter 继续)
+    /// 17:配置完成确认页(✓ 总结,Enter 继续/结束)
     Done,
-    /// 18 之前:是否继续配置手表
-    WatchAsk,
 }
 
 /// 后台任务种类(决定任务完成后的去向)。
@@ -729,6 +727,19 @@ fn demo_install_plugin(label: &str, sink: &SharedLines) -> String {
     format!("{label} plugin installed (demo)")
 }
 
+/// demo:Codex plugin 固定失败,方便测试失败 → 重试/跳过/Esc 返回的流程。
+fn demo_install_codex_fails(cli: &str, action: &str, label: &str, sink: &SharedLines) -> String {
+    push_line(sink, "(demo) adding marketplace…");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    push_line(sink, "(demo) marketplace added");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    push_line(sink, "(demo) plugin install failed");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    format!(
+        "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
+    )
+}
+
 /// 连接成功后的分流:键盘 → 输入方式;手表 → 确保 vibetty → remote 询问。
 fn after_connect(st: &mut WizardState) {
     st.log_line(format!("connected to {}", st.device.name()), true);
@@ -923,6 +934,11 @@ pub fn wizard_key(
     dir: &Path,
 ) -> Outcome {
     // 退出优先;文本输入步骤里 q 是普通字符(Ctrl-C 始终可退)。
+    // 错误框在前:Esc = 关掉错误回到本步,而不是退出向导。
+    if st.err.is_some() && key.code == KeyCode::Esc {
+        st.err = None;
+        return Outcome::none();
+    }
     if key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
@@ -948,13 +964,13 @@ pub fn wizard_key(
             } else if down {
                 st.choice = (st.choice + 1).min(1);
             } else if enter {
-                if st.choice == 0 {
-                    st.device = DeviceKind::VibeKeys;
-                    goto(st, Step::Scan);
-                    kick_scan(st, rt);
+                st.device = if st.choice == 0 {
+                    DeviceKind::VibeKeys
                 } else {
-                    goto(st, Step::WatchAsk);
-                }
+                    DeviceKind::Watch
+                };
+                goto(st, Step::Scan);
+                kick_scan(st, rt);
             }
         }
 
@@ -1210,9 +1226,12 @@ pub fn wizard_key(
                     let demo = st.demo;
                     let sink = rt.output.clone();
                     rt.job = Some(spawn_wiz(move || {
-                        let res = match demo {
-                            true => demo_install_plugin(label, &sink),
-                            false => install_plugin(cli, action, label, &sink),
+                        let res = match (demo, kind) {
+                            (true, JobKind::PluginCodex) => {
+                                demo_install_codex_fails(cli, action, label, &sink)
+                            }
+                            (true, _) => demo_install_plugin(label, &sink),
+                            (false, _) => install_plugin(cli, action, label, &sink),
                         };
                         WizOut::Installed(Ok(res))
                     }));
@@ -1428,33 +1447,10 @@ pub fn wizard_key(
             }
         }
 
-        // 17:完成确认页。Enter 继续;手表已配完则直接结束。
+        // 17:完成确认页。Enter 结束。
         Step::Done => {
             if enter {
-                if st.watch_done {
-                    return Outcome::exit();
-                }
-                st.choice = 0;
-                goto(st, Step::WatchAsk);
-            }
-        }
-
-        // 是否继续配置手表。
-        Step::WatchAsk => {
-            if up {
-                st.choice = st.choice.saturating_sub(1);
-            } else if down {
-                st.choice = (st.choice + 1).min(2);
-            } else if enter {
-                if st.choice == 2 {
-                    back_one(st, rt);
-                } else if st.choice == 0 {
-                    st.device = DeviceKind::Watch;
-                    goto(st, Step::Scan);
-                    kick_scan(st, rt);
-                } else {
-                    return Outcome::exit();
-                }
+                return Outcome::exit();
             }
         }
     }
@@ -1746,7 +1742,7 @@ fn step_screen(st: &WizardState) -> Screen {
             title: "wizard".into(),
             text,
             body: vec![],
-            hint: vec![quit],
+            hint: vec![hint_line("Esc back")],
             alert: true,
         };
     }
@@ -1766,7 +1762,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Welcome! This wizard installs the vibe tools"),
                 text_line("and configures your device over Bluetooth."),
             ];
-            s.body = choices(st, &["Yes — set up my VibeKeys keyboard", "No"]);
+            s.body = choices(st, &["VibeKeys keyboard", "VibeWatch watch"]);
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::Scan if st.connecting.is_some() => {
@@ -2024,15 +2020,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     .collect();
             }
             s.body = choices(st, &["Continue"]);
-            s.hint = vec![hint_line("Enter continue")];
-        }
-        Step::WatchAsk => {
-            s.title = "wizard — watch".into();
-            s.text = vec![text_line(
-                "Keyboard setup is complete. Configure the VibeWatch next?",
-            )];
-            s.body = choices_with_back(st, &["Yes — configure the VibeWatch", "No — finish"]);
-            s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
+            s.hint = vec![hint_line("Enter finish")];
         }
     }
     s
