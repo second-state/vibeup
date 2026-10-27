@@ -161,11 +161,12 @@ pub fn asr(target: Target, opts: AsrOpts, reset: bool, dry: bool) -> Result<()> 
         if opts.uri.is_none() && opts.api_key.is_none() && opts.model.is_none() {
             bail!("nothing to set — pass --uri/--api-key/--model, or --clean to clear");
         }
+        // 固件按整对象替换且不接受 null:没传的字段落空串。
         serde_json::json!({
             "platform": "whisper",
-            "uri": opts.uri,
-            "api_key": opts.api_key,
-            "model": opts.model,
+            "uri": opts.uri.unwrap_or_default(),
+            "api_key": opts.api_key.unwrap_or_default(),
+            "model": opts.model.unwrap_or_default(),
         })
     };
     if dry {

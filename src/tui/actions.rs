@@ -763,9 +763,34 @@ fn session_of(rt: &DeviceRuntime) -> Result<&ble::Session> {
         .ok_or_else(|| anyhow::anyhow!("device session is closed"))
 }
 
+/// 在设备现有 asr_config 上只替换被编辑的字段,其余缺省空串。
+/// 固件按整对象替换 asr_config,且不接受 null —— 没填的字段必须是 ""。
+fn merged_asr(cfg: &serde_json::Value, field: Field, val: &str) -> serde_json::Value {
+    let cur = cfg.get("asr_config");
+    let get = |k: &str| {
+        cur.and_then(|a| a.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (uri, api_key, model) = match field {
+        Field::AsrUri => (val.to_string(), get("api_key"), get("model")),
+        Field::AsrApiKey => (get("uri"), val.to_string(), get("model")),
+        _ => (get("uri"), get("api_key"), val.to_string()),
+    };
+    let platform = get("platform");
+    serde_json::json!({
+        "platform": if platform.is_empty() { "whisper".to_string() } else { platform },
+        "uri": uri,
+        "api_key": api_key,
+        "model": model,
+    })
+}
+
 pub fn do_field(
     demo: bool,
     rt: &mut DeviceRuntime,
+    cfg: &serde_json::Value,
     field: Field,
     val: &str,
 ) -> Result<()> {
@@ -786,48 +811,21 @@ pub fn do_field(
                 demo::mock_asr_set(&mut rt.mock, Some(val), None, None);
                 return Ok(());
             }
-            write(
-                rt,
-                "asr_config",
-                serde_json::json!({
-                    "platform": "whisper",
-                    "uri": val,
-                    "api_key": serde_json::Value::Null,
-                    "model": serde_json::Value::Null,
-                }),
-            )
+            write(rt, "asr_config", merged_asr(cfg, field, val))
         }
         Field::AsrApiKey => {
             if demo {
                 demo::mock_asr_set(&mut rt.mock, None, Some(val), None);
                 return Ok(());
             }
-            write(
-                rt,
-                "asr_config",
-                serde_json::json!({
-                    "platform": "whisper",
-                    "uri": serde_json::Value::Null,
-                    "api_key": val,
-                    "model": serde_json::Value::Null,
-                }),
-            )
+            write(rt, "asr_config", merged_asr(cfg, field, val))
         }
         Field::AsrModel => {
             if demo {
                 demo::mock_asr_set(&mut rt.mock, None, None, Some(val));
                 return Ok(());
             }
-            write(
-                rt,
-                "asr_config",
-                serde_json::json!({
-                    "platform": "whisper",
-                    "uri": serde_json::Value::Null,
-                    "api_key": serde_json::Value::Null,
-                    "model": val,
-                }),
-            )
+            write(rt, "asr_config", merged_asr(cfg, field, val))
         }
         Field::MicModel => {
             let v = match val.to_lowercase().as_str() {
@@ -1394,7 +1392,13 @@ fn editing_key(
                 _ => unreachable!(),
             };
             let label = state.rows[idx].label.clone();
-            let res = do_field(demo, rt, field, &val.buf);
+            let res = do_field(
+                demo,
+                rt,
+                state.config.as_ref().unwrap_or(&serde_json::Value::Null),
+                field,
+                &val.buf,
+            );
             let mut m = format!("{label}: {}", describe(&res, demo));
             after_action(demo, state, rt, res.is_ok(), &mut m);
             Some(m)
@@ -1555,7 +1559,13 @@ fn row_action(
             let current = state.rows[state.sel].value.trim().to_lowercase();
             let next = next_in_cycle(&values, &current);
             let label = state.rows[state.sel].label.clone();
-            let res = do_field(demo, rt, field, next);
+            let res = do_field(
+                demo,
+                rt,
+                state.config.as_ref().unwrap_or(&serde_json::Value::Null),
+                field,
+                next,
+            );
             *message = format!("{label}: {}", describe(&res, demo));
             after_action(demo, state, rt, res.is_ok(), message);
         }

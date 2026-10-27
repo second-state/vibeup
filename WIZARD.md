@@ -83,8 +83,8 @@ Existing entries are kept; same SSID overwrites; hard cap 8
     vibeup config keymap vibekeys MIC 'Ctrl+Shift+Space'
     vibeup config prefer-asr vibekeys off
     ```
-  - **Whisper-compatible API (on-device ASR)** → ask for the endpoint URL
-    and API key:
+  - **Whisper-compatible API (on-device ASR)** → ask for the endpoint URL,
+    API key, and (optional) model name:
     ```sh
     vibeup config asr vibekeys --uri <url> --api-key <key>
     vibeup config prefer-asr vibekeys on

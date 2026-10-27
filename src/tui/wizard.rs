@@ -104,7 +104,10 @@ pub struct WizardState {
     /// 文本输入(单/双字段)。
     pub input: Input,
     pub input2: Input,
-    pub field2: bool,
+    /// 第三输入框(AsrApi 的 model)。
+    pub input3: Input,
+    /// 当前聚焦的输入框下标(0 起;单字段步骤恒 0)。
+    pub field_idx: usize,
     /// Some(label) = 后台任务进行中,吞掉按键。
     pub busy: Option<String>,
     pub job_kind: Option<JobKind>,
@@ -151,7 +154,8 @@ impl WizardState {
             choice: 0,
             input: Input::default(),
             input2: Input::default(),
-            field2: false,
+            input3: Input::default(),
+            field_idx: 0,
             busy: None,
             job_kind: None,
             progress: None,
@@ -871,11 +875,12 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
     goto(st, Step::Done);
 }
 
-/// 进任何表单步骤前复位输入状态(防 field2/旧文本残留)。
+/// 进任何表单步骤前复位输入状态(防 field_idx/旧文本残留)。
 fn prep_form(st: &mut WizardState) {
     st.input = Input::default();
     st.input2 = Input::default();
-    st.field2 = false;
+    st.input3 = Input::default();
+    st.field_idx = 0;
 }
 
 /// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤自动重置输入。
@@ -1025,16 +1030,16 @@ pub fn wizard_key(
 
         Step::WifiForm => {
             if key.code == KeyCode::Tab || up || down {
-                st.field2 = !st.field2;
+                st.field_idx = 1 - st.field_idx;
             } else if enter {
-                if !st.field2 {
-                    st.field2 = true;
+                if st.field_idx == 0 {
+                    st.field_idx = 1;
                 } else {
                     let ssid = st.input.buf.trim().to_string();
                     let pass = st.input2.buf.trim().to_string();
                     if ssid.is_empty() {
                         st.err = Some("ssid is required".into());
-                        st.field2 = false;
+                        st.field_idx = 0;
                         return Outcome::none();
                     }
                     let mut list = match read_wifi_list(rt) {
@@ -1150,23 +1155,24 @@ pub fn wizard_key(
 
         Step::AsrApi => {
             if key.code == KeyCode::Tab || up || down {
-                st.field2 = !st.field2;
+                st.field_idx = (st.field_idx + 1) % 3;
             } else if enter {
-                if !st.field2 {
-                    st.field2 = true;
+                if st.field_idx < 2 {
+                    st.field_idx += 1;
                 } else {
                     let url = st.input.buf.trim().to_string();
                     let api_key = st.input2.buf.trim().to_string();
+                    let model = st.input3.buf.trim().to_string();
                     if url.is_empty() {
                         st.err = Some("whisper API url is required".into());
-                        st.field2 = false;
+                        st.field_idx = 0;
                         return Outcome::none();
                     }
                     let asr = serde_json::json!({
                         "platform": "whisper",
                         "uri": url,
                         "api_key": api_key,
-                        "model": null,
+                        "model": model,
                     });
                     let res = wiz_write_field(st, rt, "asr_config", asr).and_then(|()| {
                         wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(true))
@@ -1458,18 +1464,26 @@ pub fn wizard_key(
     Outcome::none()
 }
 
-/// 表单字符输入(field2 决定落在哪个框)。⌫ 在输入为空时 = 返回上一步。
+/// 表单字符输入(field_idx 决定落在哪个框)。⌫ 在输入为空时 = 返回上一步。
 fn feed_input(st: &mut WizardState, rt: &mut WizardRuntime, key: &KeyEvent) {
-    let second = st.field2;
+    let idx = st.field_idx;
     let empty = {
-        let input = if second { &st.input2 } else { &st.input };
+        let input = match idx {
+            1 => &st.input2,
+            2 => &st.input3,
+            _ => &st.input,
+        };
         input.buf.is_empty()
     };
     if key.code == KeyCode::Backspace && empty {
         back_one(st, rt);
         return;
     }
-    let input = if second { &mut st.input2 } else { &mut st.input };
+    let input = match idx {
+        1 => &mut st.input2,
+        2 => &mut st.input3,
+        _ => &mut st.input,
+    };
     match key.code {
         KeyCode::Char(c) => {
             if key
@@ -1817,8 +1831,8 @@ fn step_screen(st: &WizardState) -> Screen {
             s.title = "wizard — wifi".into();
             s.text = vec![text_line("Add a WiFi network (existing list is kept):")];
             s.body = vec![
-                field_line("ssid", &st.input, !st.field2),
-                field_line("password", &st.input2, st.field2),
+                field_line("ssid", &st.input, st.field_idx == 0),
+                field_line("password", &st.input2, st.field_idx == 1),
             ];
             s.hint = vec![hint_line("Tab field · Enter save · Esc quit")];
         }
@@ -1854,8 +1868,9 @@ fn step_screen(st: &WizardState) -> Screen {
             s.title = "wizard — whisper API".into();
             s.text = vec![text_line("Enter your whisper-compatible ASR endpoint.")];
             s.body = vec![
-                field_line("url", &st.input, !st.field2),
-                field_line("api-key", &st.input2, st.field2),
+                field_line("url", &st.input, st.field_idx == 0),
+                field_line("api-key", &st.input2, st.field_idx == 1),
+                field_line("model", &st.input3, st.field_idx == 2),
             ];
             s.hint = vec![hint_line("Tab field · Enter save · Esc quit")];
         }
