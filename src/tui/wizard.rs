@@ -1786,7 +1786,7 @@ fn step_screen(st: &WizardState) -> Screen {
                     text_line(""),
                     match st.device {
                         DeviceKind::VibeKeys => dim_text(
-                            "not found? press ACCEPT on the keyboard, then wait",
+                            "not found? boot the keyboard into Keyboard mode, press ACCEPT, then wait",
                         ),
                         _ => dim_text(
                             "not found? put the device in provisioning mode, then wait",
