@@ -18,6 +18,20 @@ fn is_interactive() -> bool {
 /// 下载进度回调:`(已下载字节, 总字节)`。总字节未知时为 None。
 pub type ProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;
 
+/// 跑一个包二进制的 `install-script` 子命令(vibekeys 的 jump 脚本落到
+/// `~/.vibekeys/scripts`,agent 插件 hook 链依赖它)。幂等,本地秒级。
+/// 结果行追加进传入的日志(带换行),由调用方决定去向。
+pub fn run_install_script(bin: &Path, log: &mut String) {
+    match Command::new(bin).arg("install-script").output() {
+        Ok(o) if o.status.success() => log.push_str("jump script installed\n"),
+        Ok(o) => log.push_str(&format!(
+            "install-script failed: {}\n",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => log.push_str(&format!("install-script failed: {e}\n")),
+    }
+}
+
 /// 安装/更新一个包。`tag` 缺省时:pre 取最新 prerelease,否则最新稳定版。
 /// 同版本已装且入口可用时跳过下载,报 up to date。`interactive` = 允许交互
 /// 确认旧版本清理(CLI);TUI 传 false(自动保留,写进日志)。

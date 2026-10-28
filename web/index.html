@@ -1,0 +1,1552 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dim">
+<!-- vibeup webui —— 浏览器版引导向导(GitHub Pages 托管,WS 连本机 vibeup webui 服务,
+     BLE 配置走 Web Bluetooth)。单文件,无构建步骤;镜像 TUI wizard(src/tui/wizard.rs)的流程。 -->
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>vibeup — Web Setup</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
+    <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet" type="text/css" />
+</head>
+
+<body class="bg-base-200 min-h-screen py-8">
+    <div class="container mx-auto px-4 max-w-3xl">
+
+        <!-- 顶栏:标题 + WS 状态 -->
+        <div class="flex justify-between items-center mb-4">
+            <h1 class="text-2xl font-bold">vibeup — Web Setup</h1>
+            <div class="flex items-center gap-2">
+                <span id="dryRunBadge" class="badge badge-warning hidden">dry-run</span>
+                <span id="wsBadge" class="badge badge-error">server: offline</span>
+            </div>
+        </div>
+
+        <!-- 被新页面顶掉的横幅 -->
+        <div id="supersededBanner" class="alert alert-warning mb-4 hidden">
+            <span>This page was taken over by a newer setup tab. Reload to reconnect.</span>
+        </div>
+
+        <!-- 步骤条 -->
+        <ul class="steps w-full mb-6 text-xs" id="stepper">
+            <li class="step" data-s="server">Server</li>
+            <li class="step" data-s="device">Device</li>
+            <li class="step" data-s="pair">Pair</li>
+            <li class="step" data-s="wifi">WiFi</li>
+            <li class="step" data-s="input">Input</li>
+            <li class="step" data-s="hotkey">Hotkey</li>
+            <li class="step" data-s="whisper">ASR</li>
+            <li class="step" data-s="vibekeys">vibekeys</li>
+            <li class="step" data-s="plugins">Plugins</li>
+            <li class="step" data-s="vibetty">vibetty</li>
+            <li class="step" data-s="broker">Broker</li>
+            <li class="step" data-s="done">Done</li>
+        </ul>
+
+        <div class="card bg-base-100 shadow-xl">
+            <div class="card-body">
+
+                <!-- ===== 步骤 1:连接服务器 ===== -->
+                <section data-panel="server" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">1 · Connect to the vibeup server</h2>
+                    <p class="text-sm opacity-70">
+                        Open this page with the pairing URL printed by <code>vibeup webui</code>
+                        (<code>?port=…&amp;token=…</code>), or enter them below.
+                    </p>
+                    <div class="grid grid-cols-1 sm:grid-cols-[10rem_1fr_auto] gap-2 items-end">
+                        <label class="form-control">
+                            <div class="label"><span class="label-text">Port</span></div>
+                            <input type="text" id="portInput" placeholder="41234" class="input input-bordered w-full">
+                        </label>
+                        <label class="form-control">
+                            <div class="label"><span class="label-text">Token</span></div>
+                            <input type="text" id="tokenInput" placeholder="uuid from vibeup webui" class="input input-bordered w-full">
+                        </label>
+                        <button class="btn btn-primary" id="wsConnectBtn">Connect</button>
+                    </div>
+                    <div id="wsCloseInfo" class="hidden"></div>
+                    <div id="wsInfo" class="text-sm opacity-70 hidden"></div>
+                    <button class="btn btn-primary hidden" id="serverNextBtn">Next: choose device</button>
+                </section>
+
+                <!-- ===== 步骤 2:选择设备 ===== -->
+                <section data-panel="device" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">2 · Which device are you setting up?</h2>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <button class="btn btn-outline btn-lg h-24" id="pickKeyboard">⌨️ Set up the VibeKeys keyboard</button>
+                        <button class="btn btn-outline btn-lg h-24" id="pickWatch">⌚ Set up the VibeWatch watch</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 3:蓝牙配对 ===== -->
+                <section data-panel="pair" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">3 · Pair over Bluetooth</h2>
+                    <p class="text-sm opacity-70">Uses Web Bluetooth (Chrome / Edge on desktop). The browser shows its
+                        own device chooser — pick your device there.</p>
+                    <div id="bleUnsupported" class="alert alert-error hidden">
+                        <span>This browser has no Web Bluetooth API. Use Chrome or Edge on desktop (not iOS).</span>
+                    </div>
+                    <button class="btn btn-primary" id="blePairBtn">Pair device…</button>
+                    <div id="bleStatus" class="text-sm"></div>
+                    <div id="snapshotBox" class="hidden">
+                        <div class="text-sm font-semibold mb-1">Current device config</div>
+                        <pre id="snapshotPre" class="bg-base-200 rounded p-3 text-xs overflow-x-auto max-h-64"></pre>
+                    </div>
+                    <div id="pairHint" class="text-xs opacity-70 hidden"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="pairBack">← Back</button>
+                        <button class="btn btn-primary flex-1" id="pairNext" disabled>Next: WiFi</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 4:WiFi ===== -->
+                <section data-panel="wifi" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">4 · WiFi networks</h2>
+                    <p class="text-sm opacity-70">2.4 GHz networks. The device connects to the first listed network in
+                        range. Order = priority; max 8.</p>
+                    <div id="wifiList" class="space-y-2"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-outline btn-sm" id="wifiAddBtn">+ Add network</button>
+                    </div>
+                    <div id="wifiErr" class="text-error text-sm"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="wifiSkip">Skip</button>
+                        <button class="btn btn-primary flex-1" id="wifiSave">Save to device</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 5:输入方式 ===== -->
+                <section data-panel="input" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">5 · Input method</h2>
+                    <p class="text-sm opacity-70">How do you type with the keyboard's MIC key?</p>
+                    <div class="flex flex-col gap-2">
+                        <button class="btn btn-outline justify-start" id="inputLocal">Local input — uses your IME (capture a hotkey next)</button>
+                        <button class="btn btn-outline justify-start" id="inputAsr">Whisper-compatible API — on-device ASR</button>
+                        <button class="btn btn-outline justify-start" id="inputDefault">Use the default hotkey (ctrl+alt) — no change</button>
+                    </div>
+                    <div id="inputErr" class="text-error text-sm"></div>
+                    <button class="btn btn-ghost" id="inputSkip">Skip</button>
+                </section>
+
+                <!-- ===== 步骤 6:热键捕捉(重头戏)===== -->
+                <section data-panel="hotkey" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">6 · Capture your IME hotkey</h2>
+                    <p class="text-sm opacity-70">Click the box below and press the combo you want. Bare modifier keys
+                        are captured too — something the TUI can't do.</p>
+                    <div id="captureArea" tabindex="0"
+                        class="border-2 border-dashed border-base-300 rounded-lg p-8 text-center cursor-text focus:border-primary outline-none select-none">
+                        <div id="heldPreview" class="text-3xl font-mono font-bold min-h-10 opacity-40">press keys…</div>
+                        <div class="text-xs opacity-60 mt-2">Esc cancels capture · modifiers: Ctrl Alt Meta/Win Shift ·
+                            special: F1–F12 Space Enter Tab Delete Insert Home End PageUp PageDown arrows</div>
+                    </div>
+                    <div id="bindingBox" class="hidden">
+                        <div class="text-sm">Generated binding string:</div>
+                        <div id="bindingStr" class="font-mono text-lg font-bold text-primary"></div>
+                    </div>
+                    <label class="form-control">
+                        <div class="label"><span class="label-text">…or a text macro (quoted, e.g. <code>"/compact\n"</code>)</span></div>
+                        <input type="text" id="macroInput" placeholder='"/compact\n"' class="input input-bordered w-full font-mono">
+                    </label>
+                    <label class="form-control">
+                        <div class="label"><span class="label-text">…or type a binding directly (bare Meta is grabbed by the desktop and can't be captured — type <code>Meta</code> instead)</span></div>
+                        <input type="text" id="manualInput" placeholder="Meta · Ctrl+Meta+X · Ctrl+Shift+Space" class="input input-bordered w-full font-mono">
+                    </label>
+                    <div id="hotkeyErr" class="text-error text-sm"></div>
+                    <div class="flex flex-wrap gap-2">
+                        <button class="btn btn-ghost" id="hotkeyBack">← Back</button>
+                        <button class="btn btn-ghost" id="hotkeySkip">Use default (ctrl+alt)</button>
+                        <button class="btn btn-primary flex-1" id="hotkeyUse">Use this hotkey</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 7:Whisper API ===== -->
+                <section data-panel="whisper" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">7 · Whisper-compatible ASR endpoint</h2>
+                    <label class="form-control">
+                        <div class="label"><span class="label-text">Endpoint URI</span></div>
+                        <input type="text" id="asrUri" placeholder="https://host/audio/transcriptions" class="input input-bordered w-full">
+                    </label>
+                    <label class="form-control">
+                        <div class="label"><span class="label-text">API key</span></div>
+                        <input type="password" id="asrKey" placeholder="Bearer token (optional)" class="input input-bordered w-full">
+                    </label>
+                    <label class="form-control">
+                        <div class="label"><span class="label-text">Model (optional)</span></div>
+                        <input type="text" id="asrModel" placeholder="whisper-1" class="input input-bordered w-full">
+                    </label>
+                    <div id="whisperErr" class="text-error text-sm"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="whisperBack">← Back</button>
+                        <button class="btn btn-ghost" id="whisperSkip">Skip</button>
+                        <button class="btn btn-primary flex-1" id="whisperSave">Save to device</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 8:vibekeys 安装 ===== -->
+                <section data-panel="vibekeys" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">8 · Install vibekeys</h2>
+                    <p class="text-sm opacity-70">The host-side app that monitors Claude Code / Codex and drives the
+                        keyboard display.</p>
+                    <div id="vibekeysStatus" class="text-sm opacity-70"></div>
+                    <progress id="vibekeysBar" class="progress hidden w-full"></progress>
+                    <div id="vibekeysPct" class="text-xs opacity-70"></div>
+                    <pre id="vibekeysLog" class="bg-base-200 rounded p-3 text-xs overflow-auto max-h-56 whitespace-pre-wrap"></pre>
+                    <div id="vibekeysErr" class="text-error text-sm"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="vibekeysSkip">Skip</button>
+                        <button class="btn btn-primary flex-1" id="vibekeysInstall">Install vibekeys</button>
+                        <button class="btn btn-primary flex-1 hidden" id="vibekeysNext">Next: agent plugins</button>
+                    </div>
+                    <p class="text-xs opacity-60 hidden" id="vibekeysJump">
+                        After install, vibekeys drops a <em>jump</em> script (run its install script once) so the agent
+                        plugins can push status to the keyboard.
+                    </p>
+                </section>
+
+                <!-- ===== 步骤 9:agent 插件 ===== -->
+                <section data-panel="plugins" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">9 · Agent plugins</h2>
+                    <p class="text-sm opacity-70">Shows agent work status on the keyboard display.</p>
+                    <div class="flex flex-wrap gap-2 items-center">
+                        <span id="detClaude" class="badge badge-ghost">Claude Code: ?</span>
+                        <span id="detCodex" class="badge badge-ghost">Codex: ?</span>
+                        <button class="btn btn-xs btn-ghost" id="pluginsRedetect">re-detect</button>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button class="btn btn-outline btn-sm" id="installClaude" disabled>Install Claude Code plugin</button>
+                        <button class="btn btn-outline btn-sm" id="installCodex" disabled>Install Codex plugin</button>
+                    </div>
+                    <div id="pluginTerm" class="hidden rounded overflow-hidden border border-base-300" style="height:20rem"></div>
+                    <div class="flex justify-end">
+                        <button class="btn btn-outline btn-error btn-sm hidden" id="pluginCancel">✕ Cancel install</button>
+                    </div>
+                    <div id="pluginsErr" class="text-error text-sm"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="pluginsSkip">Skip</button>
+                        <button class="btn btn-primary flex-1 hidden" id="pluginsNext">Next: vibetty</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 10:vibetty ===== -->
+                <section data-panel="vibetty" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">10 · vibetty</h2>
+                    <p class="text-sm opacity-70">Remote control for your agent — drive Claude Code / Codex from the
+                        watch (or the keyboard's screen).</p>
+                    <div id="vibettyStatus" class="text-sm opacity-70"></div>
+                    <div id="vibettyBrokerBox" class="text-sm hidden"></div>
+                    <progress id="vibettyBar" class="progress hidden w-full"></progress>
+                    <div id="vibettyPct" class="text-xs opacity-70"></div>
+                    <pre id="vibettyLog" class="bg-base-200 rounded p-3 text-xs overflow-auto max-h-56 whitespace-pre-wrap"></pre>
+                    <div id="vibettyErr" class="text-error text-sm"></div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="vibettySkip">Skip — no remote control</button>
+                        <button class="btn btn-primary flex-1" id="vibettyInstall">Install vibetty</button>
+                        <button class="btn btn-primary flex-1 hidden" id="vibettyNext">Next: broker / remote mode</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 11:broker / 远程模式 ===== -->
+                <section data-panel="broker" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">11 · Broker / remote mode</h2>
+
+                    <!-- 11a:问是否出局域网 -->
+                    <div data-sub="ask" class="space-y-3">
+                        <p class="text-sm opacity-70">Will you use remote mode outside the LAN?</p>
+                        <div class="flex flex-col gap-2">
+                            <button class="btn btn-outline justify-start" id="brokerLanBtn">No — LAN only</button>
+                            <button class="btn btn-outline justify-start" id="brokerRemoteBtn">Yes — outside LAN</button>
+                        </div>
+                    </div>
+
+                    <!-- 11b:局域网 —— 选本机 IP -->
+                    <div data-sub="lan" class="hidden space-y-3">
+                        <p class="text-sm opacity-70">Pick the address the device can reach on your LAN:</p>
+                        <div id="lanIps" class="flex flex-col gap-2"></div>
+                        <div id="lanErr" class="text-error text-sm"></div>
+                    </div>
+
+                    <!-- 11c:远程 —— 有没有 tailscale -->
+                    <div data-sub="remote" class="hidden space-y-3">
+                        <p class="text-sm opacity-70">Have a Tailscale account?</p>
+                        <div class="flex flex-col gap-2">
+                            <button class="btn btn-outline justify-start" id="tsYesBtn">Yes — join my tailnet</button>
+                            <button class="btn btn-outline justify-start" id="tsNoBtn">No — help me choose a broker</button>
+                        </div>
+                    </div>
+
+                    <!-- 11d:tailscale auth key -->
+                    <div data-sub="tskey" class="hidden space-y-3">
+                        <ol class="list-decimal list-inside text-sm space-y-1 opacity-80">
+                            <li>In the Tailscale console open
+                                <a class="link link-primary" href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">https://login.tailscale.com/admin/settings/keys</a>
+                            </li>
+                            <li>Click "Generate auth key…" — a one-off key (<code>tskey-auth-…</code>) is enough; the device caches its own node keys.</li>
+                            <li>Paste the key below.</li>
+                        </ol>
+                        <input type="text" id="tsKeyInput" placeholder="tskey-auth-…" class="input input-bordered w-full font-mono">
+                        <div id="tsKeyErr" class="text-error text-sm"></div>
+                        <button class="btn btn-primary" id="tsKeySave">Bind Tailscale to device</button>
+                        <button class="btn btn-outline" id="tsKeyBound">Already bound on this device — skip</button>
+                    </div>
+
+                    <!-- 11e:tailscale ip(查不到时重试;查到给 tailscale/LAN 双出口)-->
+                    <div data-sub="tsip" class="hidden space-y-3">
+                        <div id="tsIpFound" class="text-sm"></div>
+                        <div id="tsLanPick" class="space-y-2"></div>
+                        <div id="tsIpErr" class="text-error text-sm"></div>
+                        <button class="btn btn-outline" id="tsIpRetry">Retry: check tailscale IP on this machine</button>
+                    </div>
+
+                    <!-- 11f:broker 卡片(emqx / 自建)-->
+                    <div data-sub="pick" class="hidden space-y-3">
+                        <p class="text-sm opacity-70">Pick a way to reach your machine from outside:</p>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div class="card bg-base-200 border border-base-300">
+                                <div class="card-body p-4">
+                                    <h3 class="card-title text-base">EMQX Cloud</h3>
+                                    <p class="text-xs opacity-70">Free tier: 1 GB/month.
+                                        <a class="link link-primary" href="https://www.emqx.com/en/cloud" target="_blank" rel="noopener">emqx.com/en/cloud</a></p>
+                                    <button class="btn btn-sm btn-outline" id="emqxBtn">Use EMQX Cloud</button>
+                                </div>
+                            </div>
+                            <div class="card bg-base-200 border border-base-300">
+                                <div class="card-body p-4">
+                                    <h3 class="card-title text-base">Self-hosted</h3>
+                                    <p class="text-xs opacity-70">You already run your own MQTT broker.</p>
+                                    <button class="btn btn-sm btn-outline" id="selfBtn">I have a broker</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="brokerUrlBox" class="hidden space-y-2">
+                            <input type="text" id="brokerUrlInput" placeholder="mqtts://user:pass@host:8883" class="input input-bordered w-full font-mono">
+                            <div id="brokerUrlErr" class="text-error text-sm"></div>
+                            <button class="btn btn-primary" id="brokerUrlSave">Save broker</button>
+                        </div>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost" id="brokerSkip">Skip</button>
+                    </div>
+                </section>
+
+                <!-- ===== 步骤 12:完成 ===== -->
+                <section data-panel="done" class="hidden space-y-4">
+                    <h2 class="card-title text-xl">12 · Done</h2>
+                    <ul id="doneList" class="space-y-1 text-sm"></ul>
+                    <p class="text-sm opacity-70">All set. Press <kbd class="kbd kbd-sm">Ctrl-C</kbd> on the
+                        <code>vibeup webui</code> terminal when you're finished.</p>
+                    <div class="flex gap-2">
+                        <button class="btn btn-error btn-outline" id="resetDeviceBtn">Reset device</button>
+                    </div>
+                    <div id="resetMsg" class="text-sm"></div>
+                </section>
+
+            </div>
+        </div>
+
+        <!-- 总结日志(全程追加,done 页复用)-->
+        <div class="card bg-base-100 shadow-xl mt-6">
+            <div class="card-body">
+                <h3 class="card-title text-base">Summary</h3>
+                <ul id="summaryList" class="text-sm space-y-1"></ul>
+            </div>
+        </div>
+
+        <p class="text-center text-xs opacity-50 mt-6">
+            vibeup web setup · Web Bluetooth needs Chrome/Edge · server: <span id="verSpan">?</span>
+        </p>
+    </div>
+
+    <!-- toast -->
+    <div class="toast toast-top toast-end z-50" id="toastContainer"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script>
+        'use strict';
+
+        // ===== 常量 =====
+
+        // BLE:固件同款 UUID(参考 vibekeys_firmware/assets/setup.html)
+        const SERVICE_ID = '623fa3e2-631b-4f8f-a6e7-a7b09c03e7e0';
+        const CONFIG_ID = 'cef520a9-bcb5-4fc6-87f7-82804eee2b20'; // READ=快照 WRITE=部分补丁
+        const KEYMAP_ID = '6f2a291c-0e4d-4f0f-9446-50bcd0b73bb0'; // WRITE=keymap.build 的 payload
+        const RESET_ID = 'f0e1d2c3-b4a5-6789-0abc-def123456789'; // 写 RESET 重启
+
+        const WIFI_MAX = 8;
+        const ORDER = ['server', 'device', 'pair', 'wifi', 'input', 'hotkey', 'whisper', 'vibekeys', 'plugins', 'vibetty', 'broker', 'done'];
+
+        // ===== 全局状态 =====
+
+        const S = {
+            port: null,
+            token: null,
+            version: null,
+            dryRun: false,
+            deviceKind: 'keyboard',        // 'keyboard' | 'watch'
+            bleDevice: null,               // Web Bluetooth device
+            chars: {},                     // {config, keymap, reset}
+            snapshot: null,                // CONFIG 读回的整份 JSON
+            wifiList: [],                  // [{ssid, pass}]
+            path: null,                    // 输入方式选择:'local' | 'asr' | 'default'
+            capturedBinding: '',           // 热键捕捉结果(vibeup 语法)
+            plugins: null,                 // {claude, codex}
+            lanIps: [],
+            tsIp: null,
+            brokerSource: null,            // 'emqx' | 'self'
+            logLines: [],                  // [{text, ok}] 总结日志
+            current: 'server',
+        };
+
+        // ===== DOM 小工具 =====
+
+        const $ = (id) => document.getElementById(id);
+
+        function toast(msg, isError) {
+            const el = document.createElement('div');
+            el.className = 'alert ' + (isError ? 'alert-error' : 'alert-success') + ' shadow-lg';
+            el.style.display = 'flex';
+            el.textContent = msg; // textContent 转义,防设备名注入
+            $('toastContainer').appendChild(el);
+            setTimeout(() => el.remove(), 3500);
+        }
+
+        function stepError(id, msg) {
+            const el = $(id);
+            el.textContent = msg || '';
+            el.classList.toggle('hidden', !msg);
+        }
+
+        // ===== 总结日志 =====
+
+        function logLine(text, ok) {
+            S.logLines.push({ text, ok });
+            renderSummary();
+        }
+
+        function renderSummary() {
+            const ul = $('summaryList');
+            ul.textContent = '';
+            for (const l of S.logLines) {
+                const li = document.createElement('li');
+                li.textContent = (l.ok ? '✓ ' : '✗ ') + l.text;
+                li.className = l.ok ? 'text-success' : 'text-error';
+                ul.appendChild(li);
+            }
+            renderDone();
+        }
+
+        function renderDone() {
+            const ul = $('doneList');
+            ul.textContent = '';
+            if (S.logLines.length === 0) {
+                const li = document.createElement('li');
+                li.textContent = 'nothing configured yet.';
+                li.className = 'opacity-60';
+                ul.appendChild(li);
+                return;
+            }
+            for (const l of S.logLines) {
+                const li = document.createElement('li');
+                li.textContent = (l.ok ? '✓ ' : '✗ ') + l.text;
+                li.className = l.ok ? 'text-success' : 'text-error';
+                ul.appendChild(li);
+            }
+        }
+
+        // ===== WebSocket 层 =====
+
+        let ws = null;
+        const pending = new Map();     // 请求 id -> {resolve, reject}
+        const evHandlers = new Map();  // 请求 id -> fn(event, data)(安装进度/日志按 id 路由)
+        let reqSeq = 0;
+
+        function setWsBadge(state, text) {
+            const b = $('wsBadge');
+            b.className = 'badge ' + state;
+            b.textContent = text;
+        }
+
+        function connectWS(port, token) {
+            if (ws) { try { ws.close(); } catch (_) { /* ignore */ } ws = null; }
+            S.port = port;
+            S.token = token;
+            sessionStorage.setItem('vibeup_port', port);
+            sessionStorage.setItem('vibeup_token', token);
+            setWsBadge('badge-warning', 'server: connecting…');
+            $('wsCloseInfo').classList.add('hidden');
+            try {
+                ws = new WebSocket('ws://127.0.0.1:' + port + '/ws');
+            } catch (e) {
+                showClose('invalid port', null);
+                return;
+            }
+            // hello 必须是第一帧(10 秒内),否则服务端 4002 踢掉
+            pending.set('hello', {
+                resolve: (r) => {
+                    S.version = r.version;
+                    S.dryRun = !!r.dryRun;
+                    $('verSpan').textContent = r.version + (r.dryRun ? ' (dry-run)' : '');
+                    $('dryRunBadge').classList.toggle('hidden', !r.dryRun);
+                    $('wsInfo').textContent = 'vibeup ' + r.version + ' · install dir: ' + (r.installDir || '?');
+                    $('wsInfo').classList.remove('hidden');
+                    $('serverNextBtn').classList.remove('hidden');
+                    setWsBadge('badge-success', 'server: connected');
+                    toast('Connected to vibeup ' + r.version, false);
+                },
+                reject: (e) => showClose(e.message || 'hello rejected', null),
+            });
+            ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token }));
+            ws.onmessage = (ev) => {
+                let m;
+                try { m = JSON.parse(ev.data); } catch (_) { return; }
+                if (m.type === 'resp') {
+                    const p = pending.get(m.id);
+                    pending.delete(m.id);
+                    evHandlers.delete(m.id);
+                    if (!p) return;
+                    if (m.ok) p.resolve(m.result);
+                    else p.reject(new Error(m.error || 'unknown error'));
+                } else if (m.type === 'event') {
+                    onEvent(m.event, m.data, m.id);
+                }
+            };
+            ws.onclose = (ev) => {
+                pending.forEach((p) => p.reject(new Error('connection closed')));
+                pending.clear();
+                evHandlers.clear();
+                setWsBadge('badge-error', 'server: offline');
+                showClose(ev.reason || 'connection closed', ev.code);
+                // 中途掉线:回步骤 1 重连
+                if (S.current !== 'server') gotoStep('server');
+            };
+            ws.onerror = () => setWsBadge('badge-error', 'server: offline');
+        }
+
+        function showClose(reason, code) {
+            const el = $('wsCloseInfo');
+            el.className = 'alert alert-error';
+            el.textContent = 'Disconnected (' + (code !== null && code !== undefined ? 'code ' + code : 'no code') + '): ' + reason;
+            el.classList.remove('hidden');
+        }
+
+        // 命令请求:返回 Promise;事件经 id 路由给 onEv(可空)
+        function cmdEv(name, params, onEv) {
+            return new Promise((resolve, reject) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    reject(new Error('not connected to the vibeup server'));
+                    return;
+                }
+                const id = 'r' + (++reqSeq);
+                pending.set(id, { resolve, reject });
+                if (onEv) evHandlers.set(id, onEv);
+                ws.send(JSON.stringify({ type: 'cmd', id, cmd: name, params }));
+            });
+        }
+
+        const cmd = (name, params) => cmdEv(name, params, null);
+
+        // 事件分发:progress/log 按 id 路由到安装处理器;superseded 全局处理
+        function onEvent(event, data, id) {
+            if (event === 'superseded') {
+                $('supersededBanner').classList.remove('hidden');
+                gotoStep('server');
+                return;
+            }
+            const h = id && evHandlers.get(id);
+            if (h) h(event, data);
+        }
+
+        // ===== BLE 层 =====
+
+        function bleCheck() {
+            const ok = !!navigator.bluetooth;
+            $('bleUnsupported').classList.toggle('hidden', ok);
+            return ok;
+        }
+
+        // "写完设备主动断连不算失败"(手表配网路径,wiz_write_field 同款容忍)
+        function bleErrIsDisconnect(e) {
+            return String(e && e.message || e).toLowerCase().includes('disconnect');
+        }
+
+        async function blePair() {
+            if (!bleCheck()) return;
+            $('bleStatus').textContent = 'waiting for device chooser…';
+            // 按广播名前缀过滤(TUI 扫描同款):键盘和手表共用一个 service UUID,
+            // 不加 namePrefix 会把邻居家在线的手表也列进选择器
+            const namePrefix = S.deviceKind === 'keyboard' ? 'VibeKeys' : 'Watch';
+            try {
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_ID], namePrefix }],
+                    optionalServices: [SERVICE_ID],
+                });
+                console.log('[BLE] picked:', device.name, device.id);
+                S.bleDevice = device;
+                device.addEventListener('gattserverdisconnected', () => {
+                    S.chars = {};
+                    $('bleStatus').textContent = 'device disconnected';
+                    toast('Bluetooth device disconnected', true);
+                });
+                $('bleStatus').textContent = 'connecting GATT…';
+                const t0 = Date.now();
+                // 上一次尝试可能留下半开的 connected 状态:connect() 会秒回,
+                // 但 getPrimaryService 在死链上挂住 → 先强制断开重来
+                if (device.gatt.connected) {
+                    console.log('[BLE] stale connected state — disconnecting first');
+                    device.gatt.disconnect();
+                    await new Promise((r) => setTimeout(r, 300));
+                }
+                // gatt.connect 对不在范围内的设备会永远挂着,15 秒超时兜底;
+                // 超时后主动断开,清掉半开的连接(否则重试拿到的是同一条挂起的连接)
+                const withTimeout = (p, label) => Promise.race([
+                    p,
+                    new Promise((_, rej) => setTimeout(
+                        () => rej(Object.assign(new Error(label + ' timeout — press ACCEPT on the device, then pair again'), { timedOut: true })),
+                        15000,
+                    )),
+                ]);
+                let gatt;
+                try {
+                    gatt = await withTimeout(device.gatt.connect(), 'GATT connect');
+                } catch (e) {
+                    console.warn('[BLE] connect failed after', Date.now() - t0, 'ms:', e.message);
+                    if (e.timedOut) { try { device.gatt.disconnect(); } catch {} }
+                    throw e;
+                }
+                console.log('[BLE] gatt connected in', Date.now() - t0, 'ms');
+                const service = await withTimeout(gatt.getPrimaryService(SERVICE_ID), 'service discovery');
+                console.log('[BLE] primary service ok, reading characteristics…');
+                S.chars = {
+                    config: await withTimeout(service.getCharacteristic(CONFIG_ID), 'config char'),
+                    keymap: await withTimeout(service.getCharacteristic(KEYMAP_ID), 'keymap char'),
+                    reset: await withTimeout(service.getCharacteristic(RESET_ID), 'reset char'),
+                };
+                console.log('[BLE] characteristics ready');
+                $('bleStatus').textContent = 'connected: ' + (device.name || '(unnamed device)');
+                $('bleStatus').className = 'text-sm text-success';
+                $('pairHint').classList.add('hidden');
+                toast('Paired with ' + (device.name || 'device'), false);
+                await readSnapshot();
+                $('pairNext').disabled = false;
+                logLine('paired with ' + (device.name || 'device'), true);
+            } catch (e) {
+                // 用户在系统选框里点取消是常态,不算错误横幅
+                $('bleStatus').textContent = 'pair failed: ' + (e.message || e);
+                $('bleStatus').className = 'text-sm text-error';
+                const kind = S.deviceKind === 'keyboard'
+                    ? 'not found? boot the keyboard into Keyboard mode, press ACCEPT, then try again'
+                    : 'not found? put the device in provisioning mode, then try again';
+                $('pairHint').textContent = kind;
+                $('pairHint').classList.remove('hidden');
+            }
+        }
+
+        // CONFIG READ = 整份 JSON 快照
+        async function readSnapshot() {
+            if (!S.chars.config) throw new Error('device not connected');
+            const v = await S.chars.config.readValue();
+            S.snapshot = JSON.parse(new TextDecoder().decode(v));
+            const pre = $('snapshotPre');
+            pre.textContent = JSON.stringify(S.snapshot, null, 2);
+            $('snapshotBox').classList.remove('hidden');
+            S.wifiList = (S.snapshot.wifi_list || []).map((c) => ({ ssid: c.ssid || '', pass: c.pass || '' }));
+            return S.snapshot;
+        }
+
+        // CONFIG WRITE = JSON 部分补丁(只更新出现的 key)
+        async function blePatch(patch) {
+            if (!S.chars.config) throw new Error('device not connected');
+            try {
+                await S.chars.config.writeValue(new TextEncoder().encode(JSON.stringify(patch)));
+            } catch (e) {
+                if (!bleErrIsDisconnect(e)) throw e;
+            }
+        }
+
+        async function bleWriteKeymap(payload) {
+            if (!S.chars.keymap) throw new Error('device not connected');
+            try {
+                await S.chars.keymap.writeValue(new TextEncoder().encode(payload));
+            } catch (e) {
+                if (!bleErrIsDisconnect(e)) throw e;
+            }
+        }
+
+        async function bleReset() {
+            if (!S.chars.reset) throw new Error('device not connected');
+            await S.chars.reset.writeValue(new TextEncoder().encode('RESET'));
+        }
+
+        // ===== 步骤导航 =====
+
+        // 线性顺序里的实际后继(依赖输入方式分支)
+        function nextOf(step) {
+            switch (step) {
+                case 'wifi': return 'input';
+                case 'input': return S.path === 'local' ? 'hotkey' : (S.path === 'asr' ? 'whisper' : 'vibekeys');
+                case 'hotkey':
+                case 'whisper': return 'vibekeys';
+                case 'vibekeys': return 'plugins';
+                case 'plugins': return 'vibetty';
+                case 'vibetty': return 'broker';
+                case 'broker': return 'done';
+                default: return null;
+            }
+        }
+
+        function prevOf(step) {
+            // 简单回退:热键/whisper 回输入方式,其余取线性前一个
+            if (step === 'hotkey' || step === 'whisper') return 'input';
+            const i = ORDER.indexOf(step);
+            return i > 0 ? ORDER[i - 1] : null;
+        }
+
+        function gotoStep(name) {
+            S.current = name;
+            document.querySelectorAll('[data-panel]').forEach((p) => {
+                p.classList.toggle('hidden', p.dataset.panel !== name);
+            });
+            const idx = ORDER.indexOf(name);
+            document.querySelectorAll('#stepper .step').forEach((li) => {
+                const i = ORDER.indexOf(li.dataset.s);
+                li.classList.toggle('step-primary', i <= idx);
+            });
+            // 进入各步的钩子
+            if (name === 'vibekeys') onEnterVibekeys();
+            if (name === 'plugins') onEnterPlugins();
+            if (name === 'vibetty') onEnterVibetty();
+            if (name === 'broker') showSub('ask');
+            if (name === 'hotkey') {
+                $('heldPreview').textContent = 'press keys…';
+                $('heldPreview').classList.add('opacity-40');
+                setTimeout(() => $('captureArea').focus(), 50);
+            }
+            window.scrollTo({ top: 0 });
+        }
+
+        // ===== 步骤 1:连接服务器 =====
+
+        $('wsConnectBtn').addEventListener('click', () => {
+            const port = $('portInput').value.trim();
+            const token = $('tokenInput').value.trim();
+            if (!port || !token) {
+                showClose('port and token are required', null);
+                return;
+            }
+            connectWS(port, token);
+        });
+
+        $('serverNextBtn').addEventListener('click', () => gotoStep('device'));
+
+        // ===== 步骤 2:选设备 =====
+
+        $('pickKeyboard').addEventListener('click', () => {
+            S.deviceKind = 'keyboard';
+            gotoStep('pair');
+        });
+        $('pickWatch').addEventListener('click', () => {
+            S.deviceKind = 'watch';
+            gotoStep('pair');
+        });
+
+        // ===== 步骤 3:蓝牙配对 =====
+
+        $('blePairBtn').addEventListener('click', blePair);
+        $('pairBack').addEventListener('click', () => gotoStep('device'));
+        $('pairNext').addEventListener('click', () => {
+            renderWifiRows();
+            gotoStep('wifi');
+        });
+
+        // ===== 步骤 4:WiFi =====
+
+        // 整表渲染(顺序 = 连接优先级);全部用 textContent 防注入
+        function renderWifiRows() {
+            const box = $('wifiList');
+            box.textContent = '';
+            stepError('wifiErr', '');
+            S.wifiList.forEach((cred, i) => {
+                const row = document.createElement('div');
+                row.className = 'flex flex-col sm:flex-row gap-2 border border-base-300 rounded p-2 items-center';
+
+                const ssid = document.createElement('input');
+                ssid.type = 'text';
+                ssid.placeholder = 'Network name (SSID)';
+                ssid.className = 'input input-bordered input-sm w-full sm:w-56';
+                ssid.value = cred.ssid;
+                ssid.addEventListener('input', () => { S.wifiList[i].ssid = ssid.value; });
+
+                const pass = document.createElement('input');
+                pass.type = 'password';
+                pass.placeholder = 'Password';
+                pass.className = 'input input-bordered input-sm w-full';
+                pass.value = cred.pass;
+                pass.addEventListener('input', () => { S.wifiList[i].pass = pass.value; });
+
+                const rm = document.createElement('button');
+                rm.className = 'btn btn-xs btn-error btn-outline';
+                rm.textContent = 'Remove';
+                rm.addEventListener('click', () => {
+                    S.wifiList.splice(i, 1);
+                    renderWifiRows();
+                });
+
+                row.appendChild(ssid);
+                row.appendChild(pass);
+                row.appendChild(rm);
+                box.appendChild(row);
+            });
+            const n = document.createElement('div');
+            n.className = 'text-xs opacity-60';
+            n.textContent = S.wifiList.length + '/' + WIFI_MAX;
+            box.appendChild(n);
+        }
+
+        $('wifiAddBtn').addEventListener('click', () => {
+            if (S.wifiList.length >= WIFI_MAX) {
+                stepError('wifiErr', 'wifi list is full (' + WIFI_MAX + '/' + WIFI_MAX + ') — remove one first');
+                return;
+            }
+            S.wifiList.push({ ssid: '', pass: '' });
+            renderWifiRows();
+        });
+
+        $('wifiSave').addEventListener('click', async () => {
+            stepError('wifiErr', '');
+            // 空 ssid 的行直接丢弃,避免把空条目写进设备
+            const list = S.wifiList.filter((c) => c.ssid && c.ssid.trim() !== '');
+            if (list.length === 0) {
+                stepError('wifiErr', 'add at least one network with an SSID');
+                return;
+            }
+            try {
+                // wifi_list 整份写回([{ssid,pass},...]),覆盖同 ssid 即"改密码"
+                await blePatch({ wifi_list: list });
+                S.wifiList = list;
+                logLine('wifi saved (' + list.length + '/' + WIFI_MAX + ')', true);
+                toast('WiFi saved to device', false);
+                gotoStep(nextOf('wifi'));
+            } catch (e) {
+                stepError('wifiErr', String(e.message || e));
+            }
+        });
+
+        $('wifiSkip').addEventListener('click', () => {
+            logLine('wifi skipped', true);
+            gotoStep(nextOf('wifi'));
+        });
+
+        // ===== 步骤 5:输入方式 =====
+
+        async function setPreferBuiltin(v) {
+            await blePatch({ prefer_builtin_asr: v });
+            logLine('prefer_builtin_asr = ' + (v ? 'on' : 'off'), true);
+        }
+
+        $('inputLocal').addEventListener('click', () => {
+            S.path = 'local';
+            gotoStep('hotkey');
+        });
+
+        $('inputAsr').addEventListener('click', () => {
+            S.path = 'asr';
+            // 预填现有 asr_config(快照里有就用)
+            const asr = (S.snapshot && S.snapshot.asr_config) || {};
+            $('asrUri').value = asr.uri || '';
+            $('asrKey').value = asr.api_key || '';
+            $('asrModel').value = asr.model || '';
+            gotoStep('whisper');
+        });
+
+        // 默认热键:不写 KEYMAP,只关内置 ASR 优先(TUI choice==2 同款)
+        async function useDefaultHotkey(label) {
+            try {
+                await setPreferBuiltin(false);
+                logLine('keyboard MIC = ' + label, true);
+                gotoStep(nextOf('input'));
+            } catch (e) {
+                stepError('inputErr', String(e.message || e));
+            }
+        }
+
+        $('inputDefault').addEventListener('click', () => {
+            S.path = 'default';
+            stepError('inputErr', '');
+            useDefaultHotkey('default (ctrl+alt)');
+        });
+
+        $('inputSkip').addEventListener('click', () => {
+            S.path = 'default';
+            logLine('input method skipped', true);
+            gotoStep(nextOf('input'));
+        });
+
+        // ===== 步骤 6:热键捕捉 =====
+
+        // 热键捕捉:裸修饰键在浏览器可见(keydown/keyup 都能收到),TUI 做不到。
+        // 修饰键状态直接取事件自带标志(e.ctrlKey 等),无状态集——
+        // 组合键切换时 keyup 可能丢失,维护状态集会残留错项。
+        function modOf(e) {
+            switch (e.key) {
+                case 'Control': return 'Ctrl';
+                case 'Alt': return 'Alt';
+                case 'Meta': return 'Meta';
+                case 'Shift': return 'Shift';
+                default: return null;
+            }
+        }
+
+        function modsOfEvent(e) {
+            const mods = [];
+            if (e.ctrlKey) mods.push('Ctrl');
+            if (e.altKey) mods.push('Alt');
+            if (e.metaKey) mods.push('Meta'); // win/cmd 映射到语法里的 meta
+            if (e.shiftKey) mods.push('Shift');
+            // 个别平台 Super 的 keydown 不置 metaKey,按 key 名兜底
+            if (e.key === 'Meta' && !mods.includes('Meta')) mods.push('Meta');
+            return mods;
+        }
+
+        // event.key → vibeup 语法里的键名(字母大写、数字、F1-F12、特殊键)
+        function keyName(e) {
+            const k = e.key;
+            if (k === ' ') return 'Space';
+            if (/^[a-z]$/i.test(k)) return k.toUpperCase();
+            if (/^[0-9]$/.test(k)) return k;
+            if (/^F([1-9]|1[0-2])$/.test(k)) return k;
+            const map = {
+                Enter: 'Enter', Tab: 'Tab', Delete: 'Delete', Insert: 'Insert',
+                Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+                ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+            };
+            return map[k] || null;
+        }
+
+        function renderMods(e) {
+            const p = $('heldPreview');
+            const mods = modsOfEvent(e);
+            if (mods.length === 0) {
+                p.textContent = 'press keys…';
+                p.classList.add('opacity-40');
+            } else {
+                p.textContent = mods.join(' + ') + ' …';
+                p.classList.remove('opacity-40');
+            }
+        }
+
+        // 修饰键按下也实时生成 binding(语法允许单修饰键;TUI 做不到,这正是页面的意义)。
+        // 只在按下时更新——松手不减项,保留用户最后看到的组合。
+        function updateBinding(e) {
+            const mods = modsOfEvent(e);
+            if (mods.length) {
+                S.capturedBinding = mods.join('+');
+                console.log('[HOTKEY] binding =', S.capturedBinding);
+                $('bindingBox').classList.remove('hidden');
+                $('bindingStr').textContent = S.capturedBinding;
+            }
+        }
+
+        function commitCapture(e) {
+            const name = keyName(e);
+            if (!name) return;
+            const isChar = /^[a-z0-9]$/i.test(e.key) && e.key !== ' ';
+            let mods = modsOfEvent(e);
+            // 字符键的 Shift 并入大写(同 TUI);非字符键才显式写 Shift
+            if (isChar) mods = mods.filter((m) => m !== 'Shift');
+            S.capturedBinding = mods.concat(name).join('+');
+            $('bindingBox').classList.remove('hidden');
+            $('bindingStr').textContent = S.capturedBinding;
+        }
+
+        $('captureArea').addEventListener('keydown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.key === 'Escape') {
+                // Esc 取消捕捉:清空预览,不提交
+                renderMods({ ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, key: '' });
+                $('captureArea').blur();
+                return;
+            }
+            renderMods(e);
+            if (modOf(e)) {
+                // 修饰键按下:实时生成 binding(裸 Ctrl/Alt/Meta 也算)
+                updateBinding(e);
+                return;
+            }
+            commitCapture(e);
+        });
+
+        $('captureArea').addEventListener('keyup', (e) => {
+            // 只刷新"还按着什么"的预览,binding 保持最后提交的串
+            if (modOf(e)) renderMods(e);
+        });
+
+        $('captureArea').addEventListener('blur', () => {
+            renderMods({ ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, key: '' });
+        });
+
+        // 宏输入优先于捕捉结果(两者都填时,文本框算用户显式意图)
+        function hotkeyBinding() {
+            const macro = $('macroInput').value.trim();
+            if (macro) {
+                const ok = (macro.startsWith('"') && macro.endsWith('"') && macro.length >= 2) ||
+                    (macro.startsWith("'") && macro.endsWith("'") && macro.length >= 2);
+                if (!ok) throw new Error('text macro must be quoted, e.g. "/compact\\n"');
+                return macro;
+            }
+            // 手输 binding(裸 Meta 等桌面截留的键的逃生通道);服务端会再校验
+            const manual = $('manualInput').value.trim();
+            if (manual) return manual;
+            if (!S.capturedBinding) throw new Error('press a key combo first (or type a quoted macro / binding)');
+            return S.capturedBinding;
+        }
+
+        $('hotkeyUse').addEventListener('click', async () => {
+            stepError('hotkeyErr', '');
+            let binding;
+            try { binding = hotkeyBinding(); } catch (e) {
+                stepError('hotkeyErr', String(e.message || e));
+                return;
+            }
+            try {
+                // keymap.build 在服务端拼 JSON → 拿 payload 自己写 KEYMAP 特征值
+                const r = await cmd('keymap.build', { key: 'MIC', binding });
+                await bleWriteKeymap(r.payload);
+                await setPreferBuiltin(false);
+                logLine('keyboard MIC = ' + binding, true);
+                gotoStep(nextOf('hotkey'));
+            } catch (e) {
+                stepError('hotkeyErr', String(e.message || e));
+            }
+        });
+
+        $('hotkeySkip').addEventListener('click', () => {
+            stepError('hotkeyErr', '');
+            S.path = 'default';
+            useDefaultHotkey('default (ctrl+alt)');
+        });
+
+        $('hotkeyBack').addEventListener('click', () => gotoStep('input'));
+
+        // ===== 步骤 7:Whisper API =====
+
+        $('whisperSave').addEventListener('click', async () => {
+            stepError('whisperErr', '');
+            const uri = $('asrUri').value.trim();
+            if (!uri) {
+                stepError('whisperErr', 'whisper API url is required');
+                return;
+            }
+            // 关键:空字段必须给空字符串,固件拒绝 null(TUI 踩过的坑)
+            const asr = {
+                platform: 'whisper',
+                uri,
+                api_key: $('asrKey').value.trim(),
+                model: $('asrModel').value.trim(),
+            };
+            try {
+                await blePatch({ asr_config: asr });
+                logLine('asr_config = ' + uri, true);
+                await setPreferBuiltin(true);
+                gotoStep(nextOf('whisper'));
+            } catch (e) {
+                stepError('whisperErr', String(e.message || e));
+            }
+        });
+
+        $('whisperSkip').addEventListener('click', () => {
+            logLine('whisper API skipped', true);
+            gotoStep(nextOf('whisper'));
+        });
+
+        $('whisperBack').addEventListener('click', () => gotoStep('input'));
+
+        // ===== 安装通用(pkg.install / pkg.uninstall 共用进度 UI)=====
+
+        // progress 事件 → 进度条(total 为 null 时是 indeterminate)
+        function makeProgressUi(barId, pctId, logId) {
+            const bar = $(barId);
+            return {
+                begin() {
+                    bar.classList.remove('hidden');
+                    bar.removeAttribute('value');
+                    bar.removeAttribute('max');
+                    $(pctId).textContent = '';
+                    $(logId).textContent = '';
+                },
+                onEvent(event, data) {
+                    if (event === 'progress') {
+                        if (data.total) {
+                            bar.max = data.total;
+                            bar.value = data.downloaded;
+                            $(pctId).textContent =
+                                Math.round(data.downloaded / 1048576) + ' / ' +
+                                Math.round(data.total / 1048576) + ' MB';
+                        } else {
+                            bar.removeAttribute('value');
+                            $(pctId).textContent = Math.round(data.downloaded / 1048576) + ' MB';
+                        }
+                    } else if (event === 'log') {
+                        // pkg 的 log 是纯文本(非 raw ANSI),textContent 追加即可
+                        const pre = $(logId);
+                        pre.textContent += String(data.line !== undefined ? data.line : JSON.stringify(data)) + '\n';
+                        pre.scrollTop = pre.scrollHeight;
+                    }
+                },
+                end() {
+                    bar.classList.add('hidden');
+                    $(pctId).textContent = '';
+                },
+            };
+        }
+
+        async function runPkgInstall(name, ui, errId) {
+            stepError(errId, '');
+            ui.begin();
+            try {
+                const r = await cmdEv('pkg.install', { name, tag: null, pre: false }, (ev, d) => ui.onEvent(ev, d));
+                // 最终日志(含 install-script 输出)也落进滚动区
+                $(errId.replace('Err', 'Log')).textContent += (r.log || '') + '\n';
+                return r;
+            } finally {
+                ui.end();
+            }
+        }
+
+        // status.get → 已装版本提示(camelCase 字段)
+        async function showPkgStatus(name, elId) {
+            const el = $(elId);
+            try {
+                const r = await cmd('status.get');
+                const p = (r.packages || []).find((x) => x.name === name);
+                if (p && p.installed) {
+                    el.textContent = name + ' ' + (p.installed === true ? 'installed' : p.installed) +
+                        (p.updateAvailable ? ' — update available (' + (p.latestPre || p.latest) + ')' : ' (up to date)');
+                } else {
+                    el.textContent = name + ': not installed (latest ' + (p && p.latest || '?') + ')';
+                }
+            } catch (e) {
+                el.textContent = '';
+            }
+        }
+
+        // ===== 步骤 8:vibekeys =====
+
+        const vibekeysUi = makeProgressUi('vibekeysBar', 'vibekeysPct', 'vibekeysLog');
+
+        function onEnterVibekeys() {
+            showPkgStatus('vibekeys', 'vibekeysStatus');
+            $('vibekeysInstall').classList.remove('hidden');
+            $('vibekeysNext').classList.add('hidden');
+        }
+
+        $('vibekeysInstall').addEventListener('click', async () => {
+            $('vibekeysInstall').disabled = true;
+            try {
+                await runPkgInstall('vibekeys', vibekeysUi, 'vibekeysErr');
+                logLine('installed vibekeys', true);
+                $('vibekeysJump').classList.remove('hidden'); // jump 脚本提示
+                $('vibekeysInstall').classList.add('hidden');
+                $('vibekeysNext').classList.remove('hidden');
+                toast('vibekeys installed', false);
+            } catch (e) {
+                stepError('vibekeysErr', String(e.message || e));
+                logLine('vibekeys install failed', false);
+            } finally {
+                $('vibekeysInstall').disabled = false;
+            }
+        });
+
+        $('vibekeysSkip').addEventListener('click', () => {
+            logLine('skipped vibekeys', true);
+            gotoStep(nextOf('vibekeys'));
+        });
+
+        $('vibekeysNext').addEventListener('click', () => gotoStep(nextOf('vibekeys')));
+
+        // ===== 步骤 9:agent 插件(xterm.js 终端)=====
+
+        let term = null;
+        let fitAddon = null;
+
+        function ensureTerm() {
+            // 先把容器从 hidden 里拿出来再 open/fit——display:none 下初始化
+            // 会得到 0x0 的画布,之后永远显示不出输出
+            $('pluginTerm').classList.remove('hidden');
+            if (term) { term.reset(); fitAddon.fit(); return; }
+            term = new Terminal({
+                convertEol: false,
+                fontFamily: 'monospace',
+                fontSize: 13,
+                theme: { background: '#141414' },
+            });
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open($('pluginTerm'));
+            fitAddon.fit();
+        }
+
+        async function detectPlugins() {
+            try {
+                S.plugins = await cmd('plugins.detect');
+                setDetBadge('detClaude', 'Claude Code', S.plugins.claude);
+                setDetBadge('detCodex', 'Codex', S.plugins.codex);
+                $('installClaude').disabled = !S.plugins.claude;
+                $('installCodex').disabled = !S.plugins.codex;
+            } catch (e) {
+                stepError('pluginsErr', String(e.message || e));
+            }
+        }
+
+        function setDetBadge(id, label, on) {
+            const b = $(id);
+            b.textContent = label + (on ? ' detected' : ' not found');
+            b.className = 'badge ' + (on ? 'badge-success' : 'badge-ghost');
+        }
+
+        function onEnterPlugins() {
+            detectPlugins();
+            // 可跳过,Next 常驻(装不装由用户按上面的按钮)
+            $('pluginsNext').classList.remove('hidden');
+        }
+
+        async function installPlugin(cli) {
+            stepError('pluginsErr', '');
+            ensureTerm();
+            term.writeln('Installing ' + cli + ' plugin…');
+            const btn = cli === 'claude' ? $('installClaude') : $('installCodex');
+            const cancel = $('pluginCancel');
+            btn.disabled = true;
+            cancel.classList.remove('hidden');
+            try {
+                // raw log 事件带 ANSI 色码 → 直接喂 xterm
+                const r = await cmdEv('plugin.install', { cli }, (ev, d) => {
+                    if (ev === 'log') term.write((d.line || '') + '\r\n');
+                });
+                term.writeln('---');
+                term.writeln(r.summary || 'done');
+                logLine(r.summary ? cli + ' plugin: ' + String(r.summary).trim().split('\n')[0] : 'installed ' + cli + ' plugin', true);
+                toast(cli + ' plugin installed', false);
+            } catch (e) {
+                term.writeln('\x1b[31merror: ' + String(e.message || e) + '\x1b[0m');
+                stepError('pluginsErr', String(e.message || e));
+                logLine(cli + ' plugin install failed', false);
+            } finally {
+                btn.disabled = false;
+                cancel.classList.add('hidden');
+            }
+        }
+
+        $('installClaude').addEventListener('click', () => installPlugin('claude'));
+        $('installCodex').addEventListener('click', () => installPlugin('codex'));
+        // 网络卡死逃生:杀掉卡住的 CLI 进程;随后的 resp 会以失败 summary 收尾
+        $('pluginCancel').addEventListener('click', async () => {
+            try {
+                const r = await cmd('plugin.cancel');
+                term.writeln('\x1b[33m(cancel requested' + (r.cancelled ? ' — process killed)' : ' — nothing running)') + '\x1b[0m');
+            } catch (e) {
+                stepError('pluginsErr', String(e.message || e));
+            }
+        });
+        $('pluginsRedetect').addEventListener('click', detectPlugins);
+        $('pluginsSkip').addEventListener('click', () => {
+            logLine('agent plugins skipped', true);
+            gotoStep(nextOf('plugins'));
+        });
+        $('pluginsNext').addEventListener('click', () => gotoStep(nextOf('plugins')));
+
+        // ===== 步骤 10:vibetty =====
+
+        const vibettyUi = makeProgressUi('vibettyBar', 'vibettyPct', 'vibettyLog');
+
+        async function onEnterVibetty() {
+            // TUI vibetty_check 同款:已装且不落后 → 不打扰,直接进 broker。
+            let p = null;
+            try {
+                const r = await cmd('status.get');
+                p = (r.packages || []).find((x) => x.name === 'vibetty');
+            } catch (_) { /* 查不到就按未装处理,显示安装页 */ }
+            if (p && p.installed && !p.updateAvailable) {
+                logLine('vibetty ' + p.installed + ' already installed (up to date) — skipping', true);
+                gotoStep('broker');
+                return;
+            }
+            showPkgStatus('vibetty', 'vibettyStatus');
+            $('vibettyInstall').classList.remove('hidden');
+            $('vibettyNext').classList.add('hidden');
+            // 已配过的 broker 展示出来(用户可能只是想确认)
+            try {
+                const r = await cmd('vibetty.broker');
+                const box = $('vibettyBrokerBox');
+                if (r.broker) {
+                    box.textContent = 'current vibetty broker: ' + r.broker;
+                    box.classList.remove('hidden');
+                } else {
+                    box.classList.add('hidden');
+                }
+            } catch (_) { /* 查不到就算了 */ }
+        }
+
+        $('vibettyInstall').addEventListener('click', async () => {
+            $('vibettyInstall').disabled = true;
+            try {
+                await runPkgInstall('vibetty', vibettyUi, 'vibettyErr');
+                logLine('installed vibetty', true);
+                $('vibettyInstall').classList.add('hidden');
+                $('vibettyNext').classList.remove('hidden');
+                toast('vibetty installed', false);
+            } catch (e) {
+                stepError('vibettyErr', String(e.message || e));
+                logLine('vibetty install failed', false);
+            } finally {
+                $('vibettyInstall').disabled = false;
+            }
+        });
+
+        $('vibettySkip').addEventListener('click', () => {
+            logLine('skipped vibetty', true);
+            gotoStep(nextOf('vibetty'));
+        });
+
+        $('vibettyNext').addEventListener('click', () => gotoStep(nextOf('vibetty')));
+
+        // ===== 步骤 11:broker / 远程模式 =====
+
+        // 子视图切换(ask/lan/remote/tskey/tsip/pick)
+        function showSub(name) {
+            document.querySelectorAll('[data-sub]').forEach((d) => {
+                d.classList.toggle('hidden', d.dataset.sub !== name);
+            });
+        }
+
+        // 落 broker:设备写 server_url + 本机 vibetty config 写 broker(TUI apply_broker 同款)
+        async function applyBroker(deviceUrl, vibettyUrl) {
+            await blePatch({ server_url: deviceUrl });
+            logLine(S.deviceKind + ' server_url = ' + deviceUrl, true);
+            const r = await cmd('vibetty.setBroker', { url: vibettyUrl });
+            logLine('vibetty broker = ' + r.broker, true);
+            gotoStep('done');
+        }
+
+        $('brokerLanBtn').addEventListener('click', async () => {
+            stepError('lanErr', '');
+            showSub('lan');
+            try {
+                const r = await cmd('host.lanIps');
+                S.lanIps = r.ips || [];
+                const box = $('lanIps');
+                box.textContent = '';
+                if (S.lanIps.length === 0) {
+                    stepError('lanErr', 'could not detect the LAN IP — is the machine online?');
+                    return;
+                }
+                if (S.lanIps.length === 1) {
+                    // 单网卡:不打扰,直接落
+                    applyLanBroker(S.lanIps[0]);
+                    return;
+                }
+                for (const ip of S.lanIps) {
+                    const b = document.createElement('button');
+                    b.className = 'btn btn-outline justify-start font-mono';
+                    b.textContent = ip + ':1883';
+                    b.addEventListener('click', () => applyLanBroker(ip));
+                    box.appendChild(b);
+                }
+            } catch (e) {
+                stepError('lanErr', String(e.message || e));
+            }
+        });
+
+        async function applyLanBroker(ip) {
+            try {
+                // 设备侧用可路由地址(裸 host:port,与 TUI 一致);vibetty 就在本机,落 loopback
+                await applyBroker(ip + ':1883', 'mqtt://127.0.0.1:1883');
+            } catch (e) {
+                stepError('lanErr', String(e.message || e));
+            }
+        }
+
+        $('brokerRemoteBtn').addEventListener('click', () => showSub('remote'));
+
+        $('tsYesBtn').addEventListener('click', () => { stepError('tsKeyErr', ''); showSub('tskey'); });
+        // 设备上已绑过 auth-key:不再写 key,当作绑定成功,直接进 IP 检查(查到后有 tailscale/LAN 双出口)
+        $('tsKeyBound').addEventListener('click', () => {
+            stepError('tsKeyErr', '');
+            logLine('tailscale already bound on device — skipping key', true);
+            checkTailscaleIp();
+        });
+        $('tsNoBtn').addEventListener('click', () => { $('brokerUrlBox').classList.add('hidden'); showSub('pick'); });
+
+        $('tsKeySave').addEventListener('click', async () => {
+            stepError('tsKeyErr', '');
+            const key = $('tsKeyInput').value.trim();
+            if (!key) {
+                stepError('tsKeyErr', 'paste the auth key first');
+                return;
+            }
+            try {
+                // 写完 key 设备会跳到 Tailscale 页并可能主动断连 —— 视为成功
+                await blePatch({ tailscale_key: key });
+                logLine('tailscale auth key written to device', true);
+                $('tsKeyInput').value = '';
+                await checkTailscaleIp();
+            } catch (e) {
+                stepError('tsKeyErr', String(e.message || e));
+            }
+        });
+
+        async function checkTailscaleIp() {
+            showSub('tsip');
+            stepError('tsIpErr', '');
+            $('tsIpFound').textContent = 'checking…';
+            $('tsLanPick').textContent = '';
+            $('tsIpRetry').classList.add('hidden');
+            try {
+                const r = await cmd('host.tailscaleIp');
+                S.tsIp = r.ip;
+                if (!S.tsIp) {
+                    $('tsIpFound').textContent = '';
+                    if (!r.installed) {
+                        // 没装:给各平台的安装指引
+                        stepError('tsIpErr',
+                            'tailscale is not installed on this machine. Install it first:\n' +
+                            '  · Linux: curl -fsSL https://tailscale.com/install.sh | sh\n' +
+                            '  · macOS: brew install tailscale (or App Store) · Windows: winget install Tailscale.Tailscale\n' +
+                            'then run `tailscale up` and log in. Download page: https://tailscale.com/download');
+                    } else {
+                        stepError('tsIpErr', 'tailscale is installed but has no IP yet — run `tailscale up` and complete the login, then retry');
+                    }
+                    $('tsIpRetry').classList.remove('hidden');
+                    return;
+                }
+                // 查到 IP 不自动落:跳过 auth-key 时设备还没进 tailnet,
+                // tailnet IP 对它够不着——所以给出 tailscale / 局域网两个出口。
+                $('tsIpFound').textContent = 'tailscale IP on this machine: ' + S.tsIp;
+                const box = $('tsLanPick');
+                box.textContent = '';
+                const use = document.createElement('button');
+                use.className = 'btn btn-primary';
+                use.textContent = 'Use tailscale IP (' + S.tsIp + ':1883)';
+                use.addEventListener('click', async () => {
+                    try { await applyBroker(S.tsIp + ':1883', 'mqtt://127.0.0.1:1883'); }
+                    catch (e) { stepError('tsIpErr', String(e.message || e)); }
+                });
+                box.appendChild(use);
+                const lan = document.createElement('button');
+                lan.className = 'btn btn-outline';
+                lan.textContent = 'Device is not on the tailnet yet — pick a LAN address instead';
+                lan.addEventListener('click', async () => {
+                    try {
+                        const r2 = await cmd('host.lanIps');
+                        const ips = r2.ips || [];
+                        box.textContent = '';
+                        if (ips.length === 0) {
+                            stepError('tsIpErr', 'could not detect the LAN IP — is the machine online?');
+                            return;
+                        }
+                        for (const ip of ips) {
+                            const b = document.createElement('button');
+                            b.className = 'btn btn-outline justify-start font-mono';
+                            b.textContent = ip + ':1883';
+                            b.addEventListener('click', async () => {
+                                try { await applyBroker(ip + ':1883', 'mqtt://127.0.0.1:1883'); }
+                                catch (e) { stepError('tsIpErr', String(e.message || e)); }
+                            });
+                            box.appendChild(b);
+                        }
+                    } catch (e) {
+                        stepError('tsIpErr', String(e.message || e));
+                    }
+                });
+                box.appendChild(lan);
+            } catch (e) {
+                stepError('tsIpErr', String(e.message || e));
+            }
+        }
+
+        $('tsIpRetry').addEventListener('click', checkTailscaleIp);
+
+        function pickBroker(source) {
+            S.brokerSource = source;
+            $('brokerUrlBox').classList.remove('hidden');
+            $('brokerUrlInput').value = '';
+            $('brokerUrlInput').placeholder = source === 'emqx'
+                ? 'mqtts://user:pass@xxx.ala.cn-hangzhou.emqxsl.cn:8883'
+                : 'mqtts://user:pass@host:8883';
+            $('brokerUrlInput').focus();
+        }
+
+        $('emqxBtn').addEventListener('click', () => pickBroker('emqx'));
+        $('selfBtn').addEventListener('click', () => pickBroker('self'));
+
+        $('brokerUrlSave').addEventListener('click', async () => {
+            stepError('brokerUrlErr', '');
+            const url = $('brokerUrlInput').value.trim();
+            if (!url) {
+                stepError('brokerUrlErr', 'paste the broker URL first');
+                return;
+            }
+            // 先让服务端校验 scheme(mqtt:// mqtts:// ws:// wss:// + host)
+            try {
+                await cmd('vibetty.setBroker', { url });
+            } catch (e) {
+                stepError('brokerUrlErr', String(e.message || e));
+                return;
+            }
+            try {
+                // 外部 broker:设备与 vibetty 用同一个地址(TUI BrokerInput 同款)
+                await applyBroker(url, url);
+            } catch (e) {
+                stepError('brokerUrlErr', String(e.message || e));
+            }
+        });
+
+        $('brokerSkip').addEventListener('click', () => {
+            logLine('broker setup skipped', true);
+            gotoStep('done');
+        });
+
+        // ===== 步骤 12:完成 =====
+
+        $('resetDeviceBtn').addEventListener('click', async () => {
+            $('resetMsg').textContent = '';
+            try {
+                await bleReset();
+                $('resetMsg').textContent = 'Reset command sent — the device is rebooting.';
+            } catch (e) {
+                $('resetMsg').textContent = 'Reset failed (' + String(e.message || e) +
+                    '). Reboot the device manually (press k0 on the keyboard).';
+            }
+        });
+
+        // ===== 初始化 =====
+
+        (function init() {
+            if (!navigator.bluetooth) {
+                bleCheck(); // 显示不支持横幅(配对按钮仍可点,里面会再拦)
+                $('blePairBtn').disabled = true;
+            }
+            // sessionStorage 记住上次手动输入的 port/token
+            const p = sessionStorage.getItem('vibeup_port');
+            const t = sessionStorage.getItem('vibeup_token');
+            if (p) $('portInput').value = p;
+            if (t) $('tokenInput').value = t;
+            // 配对 URL 里的 ?port=&token= 直接自动连
+            const q = new URLSearchParams(window.location.search);
+            const qp = q.get('port');
+            const qt = q.get('token');
+            if (qp && qt) {
+                $('portInput').value = qp;
+                $('tokenInput').value = qt;
+                connectWS(qp, qt);
+            }
+            gotoStep('server');
+        })();
+    </script>
+</body>
+
+</html>

@@ -241,6 +241,8 @@ box:
 | `vibetty config: …` | Couldn't write `~/.vibetty/config.toml` | Check home directory permissions |
 | Plugin install fails | No network / CLI not logged in / CLI too old for `plugin` | Retry once, then give the user the two commands for later; update the CLI if it lacks `plugin` support |
 | Download stalls | Network to GitHub slow/blocked | Set `https_proxy` in the environment and retry |
+| Web UI: browser hangs on "connecting GATT…" / `service discovery timeout` (esp. after a firmware reflash) | Stale BlueZ entry: half-dead connection + cached GATT table + old bond — Chromium trusts the cache, the CLI doesn't | `bluetoothctl disconnect <MAC>; bluetoothctl remove <MAC>`, press ACCEPT, pair again from the page. Also: the chooser lists every nearby device advertising the vibe service UUID (keyboard and watch share it) — wrong-kind entries are neighbours' devices |
+| Web UI: chooser lists a device of the wrong kind | Both devices advertise the same service UUID; the page filters by name prefix (`VibeKeys…` / `Watch…`), but check the name before selecting | Pick only the prefixed name; a bare `Watch…` entry with your watch powered off is a neighbour's device |
 
 BLE diagnostics (Linux): `bluetoothctl devices` (does the device appear?),
 `bluetoothctl info <MAC>` (paired/connected?), `btmon` while reproducing.

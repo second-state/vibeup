@@ -6,10 +6,13 @@
 
 mod ble;
 mod config_cmd;
+mod hostinfo;
 mod install;
 mod pkg;
+mod plugins;
 mod status;
 mod tui;
+mod webui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -107,6 +110,16 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+    /// Start the local WebSocket server for the browser-based wizard
+    /// (open the pairing URL it prints; the page lives on GitHub Pages)
+    Webui {
+        /// Port to listen on (default: OS-assigned; always binds 127.0.0.1)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Base URL of the hosted setup page to pair with
+        #[arg(long, default_value = "https://second-state.github.io/vibeup/webui/")]
+        pages_url: String,
     },
 }
 
@@ -222,6 +235,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Config { cmd } => run_config(cmd, cli.dry_run),
+        Cmd::Webui { port, pages_url } => {
+            webui::run(cli.dir, cli.dry_run, port, &pages_url)
+        }
     }
 }
 

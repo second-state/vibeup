@@ -19,7 +19,7 @@ pub struct PkgStatus {
     pub update_available: bool,
 }
 
-fn collect(dir: &Path) -> Vec<PkgStatus> {
+pub(crate) fn collect(dir: &Path) -> Vec<PkgStatus> {
     let mut rows = Vec::new();
     for p in PKGS {
         let inst = pkg::installed_version(p, dir);

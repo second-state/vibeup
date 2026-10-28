@@ -10,10 +10,12 @@ use super::demo;
 use super::state::{wrap_words, DownloadProgress, Input, SharedProgress};
 use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
+use crate::hostinfo::{broker_url_valid, broker_with_host, local_ips, set_vibetty_broker, tailscale_ip};
 use crate::install;
 use crate::pkg;
-use std::io::{BufRead, BufReader};
-use std::process::Stdio;
+use crate::plugins::{
+    cli_on_path, demo_install_codex_fails, demo_install_plugin, install_plugin, SharedLines,
+};
 
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::*;
@@ -172,9 +174,6 @@ impl WizardState {
     }
 }
 
-/// 后台任务输出行(实时流,UI 每 100ms 快照一次)。
-pub type SharedLines = Arc<Mutex<Vec<String>>>;
-
 /// 后台句柄(非 Clone,进 Arc<Mutex> 供事件 handler 与 ticker 共用)。
 pub struct WizardRuntime {
     pub job: Option<WizJob>,
@@ -242,139 +241,6 @@ fn spawn_wiz(f: impl FnOnce() -> WizOut + Send + 'static) -> WizJob {
 fn vibetty_binary(dir: &Path) -> Option<String> {
     let p = pkg::find("vibetty").ok()?;
     pkg::installed_version(p, dir)
-}
-
-/// 写 `~/.vibetty/config.toml` 的 `[mqtt] broker`。文件不存在就建;已存在
-/// 则行级替换/插入,保留其余内容(不引 toml 依赖,注释也保得住)。
-pub fn set_vibetty_broker(url: &str) -> anyhow::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    let path = home.join(".vibetty").join("config.toml");
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-    let mut mqtt_at: Option<usize> = None;
-    let mut broker_at: Option<usize> = None;
-    for (i, line) in lines.iter().enumerate() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            if t.eq_ignore_ascii_case("[mqtt]") {
-                mqtt_at = Some(i);
-            } else if mqtt_at.is_some() {
-                break; // [mqtt] 段结束,没找到 broker 行
-            }
-            continue;
-        }
-        if mqtt_at.is_some()
-            && let Some((k, _)) = t.split_once('=')
-            && k.trim() == "broker"
-        {
-            broker_at = Some(i);
-            break;
-        }
-    }
-    let newline = format!("broker = \"{url}\"");
-    match (mqtt_at, broker_at) {
-        (_, Some(i)) => lines[i] = newline,
-        (Some(i), None) => lines.insert(i + 1, newline),
-        (None, _) => {
-            if !lines.is_empty() && !lines[lines.len() - 1].trim().is_empty() {
-                lines.push(String::new());
-            }
-            lines.push("[mqtt]".into());
-            lines.push(newline);
-        }
-    }
-    let mut out = lines.join("\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    std::fs::write(&path, out)?;
-    Ok(())
-}
-
-/// `tailscale ip -4`(命令不存在/未登录 = None)。
-fn tailscale_ip() -> Option<String> {
-    let out = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
-}
-
-/// 把 url 的 host 换成 ip,保留 scheme/userinfo/port/路径。
-fn broker_with_host(url: &str, ip: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let (userinfo, after) = match rest.rsplit_once('@') {
-        Some((u, a)) => (format!("{u}@"), a),
-        None => (String::new(), rest),
-    };
-    let (hostport, tail) = match after.split_once('/') {
-        Some((h, t)) => (h, Some(t)),
-        None => (after, None),
-    };
-    let port = hostport
-        .rsplit_once(':')
-        .and_then(|(_, p)| (!p.is_empty()).then(|| format!(":{p}")))
-        .unwrap_or_default();
-    let tail = tail.map(|t| format!("/{t}")).unwrap_or_default();
-    format!("{scheme}://{userinfo}{ip}{port}{tail}")
-}
-
-/// 本机非回环 IPv4 候选列表(默认路由 + Linux 全量 + tailscale,去重)。
-fn local_ips() -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    // 默认路由地址(UDP connect 技巧,不发包)。
-    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0")
-        && s.connect("8.8.8.8:80").is_ok()
-        && let Ok(a) = s.local_addr()
-    {
-        out.push(a.ip().to_string());
-    }
-    // Linux:hostname -I 列出全部 IPv4。
-    if let Ok(o) = std::process::Command::new("hostname").arg("-I").output()
-        && o.status.success()
-    {
-        for ip in String::from_utf8_lossy(&o.stdout).split_whitespace() {
-            out.push(ip.to_string());
-        }
-    }
-    // tailscale 网段。
-    if let Some(ip) = tailscale_ip() {
-        out.push(ip);
-    }
-    out.retain(|ip| !ip.starts_with("127.") && ip != "::1");
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// 步骤 15 的 broker 地址校验:scheme 合法 + host 非空。
-fn broker_url_valid(url: &str) -> bool {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    if !matches!(scheme, "mqtt" | "mqtts" | "ws" | "wss") {
-        return false;
-    }
-    let authority = rest.split(['/', '?']).next().unwrap_or("");
-    // 允许 user:pass@host:port,取 @ 后面的部分。
-    let host = authority.rsplit('@').next().unwrap_or("");
-    !host.is_empty()
-}
-
-fn cli_on_path(cli: &str) -> bool {
-    std::process::Command::new(cli)
-        .arg("--version")
-        .output()
-        .is_ok()
 }
 
 /// 读设备当前 wifi_list(真机走会话;demo/mock 直接读)。
@@ -558,147 +424,13 @@ fn start_install(st: &mut WizardState, rt: &mut WizardRuntime, kind: JobKind) {
                 // vibekeys 装完顺带跑它的 install-script:jump 脚本落到
                 // ~/.vibekeys/scripts,插件 hook 链依赖它。幂等,本地秒级。
                 if is_vibekeys && !dry_run {
-                    match std::process::Command::new(&bin).arg("install-script").output() {
-                        Ok(o) if o.status.success() => {
-                            log.push_str("jump script installed\n");
-                        }
-                        Ok(o) => log.push_str(&format!(
-                            "install-script failed: {}\n",
-                            String::from_utf8_lossy(&o.stderr).trim()
-                        )),
-                        Err(e) => log.push_str(&format!("install-script failed: {e}\n")),
-                    }
+                    install::run_install_script(&bin, &mut log);
                 }
                 WizOut::Installed(Ok(log))
             }
             Err(e) => WizOut::Installed(Err(e)),
         }
     }));
-}
-
-/// 过滤 ANSI 转义序列与回车(claude/codex CLI 的进度条输出在 TUI 里是乱码)。
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => {
-                // CSI 序列:跳到结束字节(@..~)。
-                if let Some('[') = chars.next() {
-                    for c2 in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c2) {
-                            break;
-                        }
-                    }
-                }
-            }
-            '\r' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// 往共享输出缓冲推一行(限长,保留最近 80 行)。
-fn push_line(sink: &SharedLines, line: &str) {
-    let clean = strip_ansi(line);
-    if clean.trim().is_empty() {
-        return;
-    }
-    let mut g = sink.lock().unwrap();
-    g.push(format!("  │ {}", clean.chars().take(90).collect::<String>()));
-    let len = g.len();
-    if len > 80 {
-        g.drain(..len - 80);
-    }
-}
-
-/// 跑一条命令,stdout/stderr 逐行实时推给 sink。返回是否成功退出。
-fn stream_cmd(cli: &str, args: &[&str], sink: &SharedLines) -> bool {
-    push_line(sink, &format!("$ {cli} {}", args.join(" ")));
-    let Ok(mut child) = std::process::Command::new(cli)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
-        push_line(sink, "  failed to spawn");
-        return false;
-    };
-    // stderr 单独线程读,stdout 本线程读,防管道写满互相卡死。
-    let stderr = child.stderr.take();
-    let sink2 = sink.clone();
-    let err_reader = std::thread::spawn(move || {
-        if let Some(s) = stderr {
-            for line in BufReader::new(s).lines().map_while(Result::ok) {
-                push_line(&sink2, &line);
-            }
-        }
-    });
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            push_line(sink, &line);
-        }
-    }
-    let status = child.wait();
-    let _ = err_reader.join();
-    match status {
-        Ok(s) if s.success() => {
-            push_line(sink, "  ✓ done");
-            true
-        }
-        Ok(s) => {
-            push_line(sink, &format!("  ✗ exit {}", s.code().unwrap_or(-1)));
-            false
-        }
-        Err(e) => {
-            push_line(sink, &format!("  ✗ {e}"));
-            false
-        }
-    }
-}
-
-/// 装 (cli, label) 的 agent plugin:marketplace add + plugin install。
-/// hook 配置都在 plugin 里,装上即生效。输出实时流到 sink。
-/// 返回总结页要显示的行。
-fn install_plugin(cli: &str, action: &str, label: &str, sink: &SharedLines) -> String {
-    let ok1 = stream_cmd(
-        cli,
-        &["plugin", "marketplace", "add", "second-state/marketplace"],
-        sink,
-    );
-    let ok2 = stream_cmd(cli, &["plugin", action, "vibekeys@second-state-tools"], sink);
-    if ok1 && ok2 {
-        format!("{label} plugin installed")
-    } else {
-        format!(
-            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-        )
-    }
-}
-
-/// demo 假装装 plugin(输出也走流)。
-fn demo_install_plugin(label: &str, sink: &SharedLines) -> String {
-    push_line(sink, "(demo) adding marketplace…");
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    push_line(sink, "(demo) marketplace added");
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    push_line(sink, "(demo) plugin installed");
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    format!("{label} plugin installed (demo)")
-}
-
-/// demo:Codex plugin 固定失败,方便测试失败 → 重试/跳过/Esc 返回的流程。
-fn demo_install_codex_fails(cli: &str, action: &str, label: &str, sink: &SharedLines) -> String {
-    push_line(sink, "(demo) adding marketplace…");
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    push_line(sink, "(demo) marketplace added");
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    push_line(sink, "(demo) plugin install failed");
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    format!(
-        "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-    )
 }
 
 /// 连接成功后的分流:键盘 → 输入方式;手表 → 确保 vibetty → remote 询问。
@@ -2202,17 +1934,10 @@ mod tests {
 
     #[test]
     fn host_swap_preserves_everything_but_host() {
+        // 实现已移到 crate::hostinfo,这里保留一份调用侧冒烟。
         assert_eq!(
             broker_with_host("mqtt://127.0.0.1:1883", "192.168.1.250"),
             "mqtt://192.168.1.250:1883"
-        );
-        assert_eq!(
-            broker_with_host("mqtt://127.0.0.1", "10.0.0.2"),
-            "mqtt://10.0.0.2"
-        );
-        assert_eq!(
-            broker_with_host("wss://user:pw@127.0.0.1:8080/mqtt", "192.168.1.2"),
-            "wss://user:pw@192.168.1.2:8080/mqtt"
         );
     }
 }
