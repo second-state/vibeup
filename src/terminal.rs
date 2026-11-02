@@ -174,14 +174,15 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
 /// windows:只支持 Windows Terminal。wt.exe 的应用执行别名在
 /// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH)。
 ///
-/// 新标签页里用**父进程的 shell** 跑 `cmd`,命令解析成绝对路径传入,
-/// PATH 环境无关紧要;命令退出即关标签。
+/// 新标签页里用 `cmd /C <绝对短路径>` 跑目标,命令退出即关标签。绝对路径 +
+/// 8.3 短路径双保险,完全不依赖新标签的 PATH。
 ///
-/// wt 的 new-tab 解析会把 `-` 开头的参数当成自己的选项(pwsh 的 flag 拆开
-/// 传必挂 "arguments were not expected"),带引号的整串又会被它再引一层
-/// (变成 `""…""`,CreateProcess 拿到空程序名,0x80070057)。所以 PowerShell
-/// 路径用 **cmd /c 外兜**:外层 cmd 无破折号,wt 解析器放行;内层引号按
-/// CommandLineToArgvW 规则 \" 转义。
+/// 会话内层用什么 shell 由 vibetty 自己读 `SHELL` 环境变量决定(和 unix 一致):
+/// 想要 pwsh 就把用户环境变量 `SHELL` 设成 pwsh。
+///
+/// wt 的 new-tab 解析会把 `-` 开头的参数当成自己的选项,带空格/引号的参数
+/// 又会被它二次包裹(0x80070057 空程序名)——所以这里只用无引号、无空格的
+/// 短路径形态。
 #[cfg(windows)]
 pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let bin = "wt.exe";
@@ -191,19 +192,9 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let mut full = resolve_on_path(cmd)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| cmd.to_string());
-    // 转 8.3 短路径:保证不含空格,后面就不需要任何内层引号
-    // (wt 对含空格的参数会二次包裹,带引号必挂 0x80070057)。
+    // 转 8.3 短路径:保证不含空格,就不需要任何内层引号。
     full = short_path(&full);
-
-    // PowerShell 会话:cmd /c 链进 pwsh(PS7)→ powershell。
-    // 整条命令行作为**单个不含引号的参数**传给 wt——wt 会自己包一层引号,
-    // CreateProcess 正常解析 `cmd /c pwsh.exe ...`;内层引号只会坏事。
-    let commandline = if parent_is_pwsh() {
-        format!("cmd /c pwsh.exe -NoLogo -Command {full}")
-    } else {
-        format!("cmd /C {full}")
-    };
-    spawn_detached(bin, &["new-tab".into(), commandline])
+    spawn_detached(bin, &["new-tab".into(), "cmd".into(), "/C".into(), full])
 }
 
 /// 8.3 短路径(去空格);卷不支持 8.3 名时原样返回。
@@ -221,44 +212,6 @@ fn short_path(p: &str) -> String {
         return p.to_string();
     }
     String::from_utf16_lossy(&buf[..got as usize])
-}
-
-/// 父进程是不是 PowerShell?env 启发式(PSMODULEPATH)不可靠——cmd 下也会
-/// 从环境继承到它。直接查控制台进程列表里本进程的父进程映像名。
-#[cfg(windows)]
-fn parent_is_pwsh() -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Console::GetConsoleProcessList;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    };
-
-    let mut ids = [0u32; 32];
-    let n = unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 32) } as usize;
-    if n < 2 {
-        return false;
-    }
-    // 列表大致按「先来的在前」:父 shell 在我们前面,取倒数第一个非自身。
-    let me = std::process::id();
-    let Some(&pid) = ids[..n].iter().rev().find(|&&p| p != me) else {
-        return false;
-    };
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return false;
-    }
-    let mut buf = [0u16; 512];
-    let mut len = buf.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
-    };
-    unsafe { CloseHandle(handle) };
-    if ok == 0 {
-        return false;
-    }
-    let name = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-    name.ends_with("\\pwsh.exe") || name.ends_with("\\powershell.exe")
 }
 
 /// 在当前进程的 PATH 里解析命令的绝对路径(含不带/带 `.exe` 两种形态);
