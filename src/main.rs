@@ -8,6 +8,7 @@ mod ble;
 mod config_cmd;
 mod install;
 mod pkg;
+mod share_manager;
 mod status;
 mod tui;
 

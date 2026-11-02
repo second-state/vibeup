@@ -12,13 +12,15 @@ use std::sync::{Arc, Mutex};
 
 // ===== 应用 =====
 
-/// 三个标签:键盘 / 手表(BLE 设备配置)+ 管理(vibetty / vibekeys 安装更新)。
+/// 四个标签:键盘 / 手表(BLE 设备配置)+ 管理(vibetty / vibekeys 安装更新)
+/// + share(herdr 里的 vibetty 会话)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Tab {
     #[default]
     Packages,
     Keyboard,
     Watch,
+    Share,
 }
 
 impl Tab {
@@ -26,7 +28,8 @@ impl Tab {
         match self {
             Self::Packages => Self::Keyboard,
             Self::Keyboard => Self::Watch,
-            Self::Watch => Self::Packages,
+            Self::Watch => Self::Share,
+            Self::Share => Self::Packages,
         }
     }
 }
@@ -627,6 +630,23 @@ pub struct PkgState {
     /// 装完 vibekeys 待处理:自动跑 install-script + 弹 plugin 询问。
     pub vibekeys_pending: bool,
     pub plugin_ask: Option<PluginAsk>,
+}
+
+// ===== Share 页状态 =====
+
+/// Share 页渲染状态:herdr 里的 agent 列表(进入 tab 时同步扫描)。
+#[derive(Clone, Default)]
+pub struct ShareState {
+    /// 进 tab 时做过一次检测。
+    pub checked: bool,
+    pub installed: bool,
+    /// herdr 在但查询失败(每个 session 的错误合并)。
+    pub err: Option<String>,
+    /// agent 行(跨所有 running session)。
+    pub rows: Vec<crate::share_manager::herdr::AgentRow>,
+    /// 当前 vibetty share 会话(重扫时同步拉;列表展示用)。
+    pub shared: Vec<crate::share_manager::Session>,
+    pub sel: usize,
 }
 
 // ===== 设备页整体状态 =====

@@ -64,6 +64,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
+    let share = hooks.use_state(super::state::ShareState::default);
     let mut message =
         hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions · Esc quit".to_string());
     let allow_pre = hooks.use_state(|| false);
@@ -257,6 +258,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
             let mut ps = pkg.write();
             let prt_arc = pkg_rt.read().clone();
             let mut prt = prt_arc.lock().unwrap();
+            let mut sh = share.write();
             let mut msg = message.write();
             let mut ap = allow_pre.write();
             let outcome = actions::handle_key(
@@ -269,6 +271,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 rt_watch,
                 &mut ps,
                 &mut prt,
+                &mut sh,
                 &dir,
                 dry_run,
                 demo,
@@ -301,6 +304,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 state: pkg,
                 allow_pre: allow_pre.get(),
             })).into()],
+            Tab::Share => vec![element!(SharePage(..SharePageProps { state: share })).into()],
         }
     };
     // 新用户询问框:盖在页区上方(与包菜单弹窗同款布局)。
@@ -321,6 +325,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let page_border = ratatui_kit::components::BorderProps {
         borders: Borders::ALL,
         border_style: Some(Style::new().dark_gray()),
+        // Share 页的内容框左上角标出来源。
+        top_title: (tab_val == Tab::Share).then(|| {
+            Line::from(Span::styled(" Herdr ", Style::new().dark_gray()))
+        }),
         children: page_children,
         ..Default::default()
     };
@@ -362,18 +370,20 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 }
 
 fn tab_line(tab: Tab) -> Line<'static> {
-    let spans: Vec<Span> = [Tab::Packages, Tab::Keyboard, Tab::Watch]
+    let spans: Vec<Span> = [Tab::Packages, Tab::Keyboard, Tab::Watch, Tab::Share]
         .iter()
         .map(|t| {
             let n = match t {
                 Tab::Packages => 1,
                 Tab::Keyboard => 2,
                 Tab::Watch => 3,
+                Tab::Share => 4,
             };
             let name = match t {
                 Tab::Packages => "Packages",
                 Tab::Keyboard => "Keyboard",
                 Tab::Watch => "Watch",
+                Tab::Share => "Share",
             };
             let text = format!(" {n} {name} ");
             let style = if *t == tab {
@@ -876,6 +886,107 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
 
 fn short(s: &str) -> &str {
     super::state::short_status(s)
+}
+
+// ===== Share 页 =====
+
+#[derive(Props)]
+pub struct SharePageProps {
+    pub state: State<super::state::ShareState>,
+}
+
+/// 截断到 n 个字符(超长加 …)。
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>())
+    }
+}
+
+/// agent 状态的展示色。
+fn state_style(state: &str) -> Style {
+    match state {
+        "working" => Style::new().light_yellow(),
+        "waiting" => Style::new().yellow(),
+        "error" => Style::new().red(),
+        "done" => Style::new().green(),
+        "idle" => Style::new().dark_gray(),
+        _ => Style::new(),
+    }
+}
+
+/// herdr 里的 agent 列表:title / session / agent / state 四列,
+/// 进 tab 时已在 switch_to 里同步扫描。
+#[component]
+pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
+    let st = props.state.read().clone();
+    let lines: Vec<Line<'static>> = if !st.checked {
+        vec![Line::from(" checking herdr…")]
+    } else if !st.installed {
+        vec![Line::from(Span::styled(
+            " herdr not found — install it to manage shared agent sessions",
+            Style::new().dark_gray(),
+        ))]
+    } else if let Some(e) = &st.err {
+        vec![Line::from(Span::styled(
+            format!(" {e}"),
+            Style::new().red(),
+        ))]
+    } else if st.rows.is_empty() {
+        vec![Line::from(Span::styled(
+            " no herdr agents running",
+            Style::new().dark_gray(),
+        ))]
+    } else {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(format!("{:<30}", "title"), Style::new().bold()),
+            Span::styled(format!("{:<10}", "session"), Style::new().bold()),
+            Span::styled(format!("{:<8}", "agent"), Style::new().bold()),
+            Span::styled(format!("{:<10}", "state"), Style::new().bold()),
+            Span::styled("share", Style::new().bold()),
+        ])];
+        for (i, r) in st.rows.iter().enumerate() {
+            let shared = st
+                .shared
+                .iter()
+                .find(|s| s.target == r.pane_id)
+                .map(|s| s.pane_id.clone());
+            let share_span = match &shared {
+                Some(id) => Span::styled(id.clone(), Style::new().green()),
+                None => Span::styled("-", Style::new().dark_gray()),
+            };
+            let line = Line::from(vec![
+                Span::raw(format!("{:<30}", clip(&r.title, 29))),
+                Span::raw(format!("{:<10}", clip(&r.session, 9))),
+                Span::raw(format!("{:<8}", r.agent)),
+                Span::styled(format!("{:<10}", r.state.clone()), state_style(&r.state)),
+                share_span,
+            ]);
+            lines.push(if i == st.sel {
+                line.style(Style::new().bg(Color::DarkGray))
+            } else {
+                line
+            });
+        }
+        lines
+    };
+    let mut children: Vec<AnyElement<'static>> = Vec::new();
+    for line in lines {
+        children.push(
+            element!(View(height: Constraint::Length(1)) {
+                Text(text: line)
+            })
+            .into(),
+        );
+    }
+    let vp = ratatui_kit::components::ViewProps {
+        flex_direction: Direction::Vertical,
+        children,
+        ..Default::default()
+    };
+    let el: AnyElement<'static> = element!(View(..vp)).into();
+    el
 }
 
 /// keymap 编辑弹窗:自绘 Widget(手动居中 + ratatui 原生渲染)。

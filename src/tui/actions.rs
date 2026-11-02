@@ -969,6 +969,7 @@ pub fn handle_key(
     watch_rt: &mut DeviceRuntime,
     pkg: &mut PkgState,
     pkg_rt: &mut PkgRuntime,
+    share: &mut super::state::ShareState,
     dir: &Path,
     dry_run: bool,
     demo: bool,
@@ -993,6 +994,100 @@ pub fn handle_key(
 
     let mut message = String::new();
 
+    // ---- Share 页 ----
+    if tab.get() == super::state::Tab::Share {
+        match code {
+            KeyCode::Char('1') => {
+                switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+            }
+            KeyCode::Char('2') => {
+                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+            }
+            KeyCode::Char('3') => {
+                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+            }
+            KeyCode::Char('4') => {
+                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+            }
+            KeyCode::Tab => {
+                let next = tab.get().next();
+                switch_to(&mut tab, next, keys, watch, share);
+                return KeyOutcome::msg(tab_message(next));
+            }
+            KeyCode::Esc => {
+                return KeyOutcome {
+                    message: None,
+                    exit: true,
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                share.sel = (share.sel + 1).min(share.rows.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => share.sel = share.sel.saturating_sub(1),
+            KeyCode::Char('r') => {
+                share_rescan(share);
+                message = format!("share — {} agent(s)", share.rows.len());
+            }
+            KeyCode::Char('s') | KeyCode::Enter => {
+                let Some(row) = share.rows.get(share.sel) else {
+                    message = "share — nothing selected".into();
+                    return KeyOutcome::msg(message);
+                };
+                let target = row.pane_id.clone();
+                // toggle:已 share(按上次扫描的缓存)→ 取消;没 share → 开 share。
+                let already = share
+                    .shared
+                    .iter()
+                    .find(|s| s.target == target)
+                    .map(|s| s.pane_id.clone());
+                if let Some(id) = already {
+                    match crate::share_manager::close(&id) {
+                        Ok(()) => {
+                            share_rescan(share);
+                            message = format!("unshared {target}");
+                        }
+                        Err(e) => message = format!("unshare failed: {e:#}"),
+                    }
+                } else {
+                    match crate::share_manager::share(&target) {
+                        Ok(id) => {
+                            share_rescan(share);
+                            message = format!("shared {target} → {id}");
+                        }
+                        Err(e) => message = format!("share failed: {e:#}"),
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                let Some(row) = share.rows.get(share.sel) else {
+                    message = "share — nothing selected".into();
+                    return KeyOutcome::msg(message);
+                };
+                let target = row.pane_id.clone();
+                // 找到该 agent 当前的 share pane(可能没有)。
+                let shared = crate::share_manager::list()
+                    .map(|v| v.into_iter().find(|s| s.target == target));
+                match shared {
+                    Ok(Some(s)) => match crate::share_manager::close(&s.pane_id) {
+                        Ok(()) => {
+                            share_rescan(share);
+                            message = format!("unshared {target}");
+                        }
+                        Err(e) => message = format!("unshare failed: {e:#}"),
+                    },
+                    Ok(None) => message = format!("{target} is not shared"),
+                    Err(e) => message = format!("share list failed: {e:#}"),
+                }
+            }
+            _ => {}
+        }
+        return KeyOutcome::msg(std::mem::take(&mut message));
+    }
+
     // ---- 设备页 ----
     if tab.get() != super::state::Tab::Packages {
         let (state, rt): (&mut DeviceState, &mut DeviceRuntime) =
@@ -1004,7 +1099,7 @@ pub fn handle_key(
         // pop 框独占按键(Tab 仍可切标签)。
         if state.popup.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1016,7 +1111,7 @@ pub fn handle_key(
         // keymap 弹窗独占按键(Tab 仍可切标签)。
         if state.keymap_popup.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1028,7 +1123,7 @@ pub fn handle_key(
         // 行内编辑独占按键(Tab 仍可切标签)。
         if state.editing.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1040,7 +1135,7 @@ pub fn handle_key(
         // 连接流程(未就绪)独占按键;Tab 切标签保持可用。
         if state.conn != Conn::Ready {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let demo = state.demo;
@@ -1064,20 +1159,24 @@ pub fn handle_key(
         // 就绪页:切标签键优先(与旧版全局键一致),然后行导航/动作。
         match code {
             KeyCode::Char('1') => {
-                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch);
+                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
             }
             KeyCode::Char('2') => {
-                switch_to(&mut tab, super::state::Tab::Watch, keys, watch);
+                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
             }
             KeyCode::Char('3') => {
-                switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
+                switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+            }
+            KeyCode::Char('4') => {
+                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
-                switch_to(&mut tab, next, keys, watch);
+                switch_to(&mut tab, next, keys, watch, share);
                 return KeyOutcome::msg(tab_message(next));
             }
             // 这里已无弹窗/编辑可关闭,Esc = 退出应用。
@@ -1191,20 +1290,24 @@ pub fn handle_key(
             };
         }
         KeyCode::Char('1') => {
-            switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
+            switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
             return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
         }
         KeyCode::Char('2') => {
-            switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch);
+            switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
             return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
         }
         KeyCode::Char('3') => {
-            switch_to(&mut tab, super::state::Tab::Watch, keys, watch);
+            switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
             return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+        }
+        KeyCode::Char('4') => {
+            switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Share));
         }
         KeyCode::Tab => {
             let next = tab.get().next();
-            switch_to(&mut tab, next, keys, watch);
+            switch_to(&mut tab, next, keys, watch, share);
             return KeyOutcome::msg(tab_message(next));
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -1264,6 +1367,9 @@ fn tab_message(t: super::state::Tab) -> String {
             "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
                 .into()
         }
+        super::state::Tab::Share => {
+            "share — s/Enter toggle · d unshare · r refresh · Esc quit".into()
+        }
     }
 }
 
@@ -1271,11 +1377,31 @@ fn switch_tab(
     tab: &mut ratatui_kit::State<super::state::Tab>,
     keys: &mut DeviceState,
     watch: &mut DeviceState,
+    share: &mut super::state::ShareState,
     message: &mut String,
 ) {
     let next = tab.get().next();
-    switch_to(tab, next, keys, watch);
+    switch_to(tab, next, keys, watch, share);
     *message = tab_message(next);
+}
+
+/// 进 Share 页:检测 herdr 并同步扫描 agent 列表(几次进程调用,毫秒级)。
+fn share_rescan(share: &mut super::state::ShareState) {
+    share.checked = true;
+    share.sel = 0;
+    share.err = None;
+    if !crate::share_manager::herdr::installed() {
+        share.installed = false;
+        share.rows.clear();
+        return;
+    }
+    share.installed = true;
+    match crate::share_manager::herdr::scan() {
+        Ok(rows) => share.rows = rows,
+        Err(e) => share.err = Some(format!("{e:#}")),
+    }
+    // share 状态拉取失败不挡列表(显示成没 share);d 动作会用实时 list 兜底。
+    share.shared = crate::share_manager::list().unwrap_or_default();
 }
 
 fn switch_to(
@@ -1283,12 +1409,15 @@ fn switch_to(
     next: super::state::Tab,
     keys: &mut DeviceState,
     watch: &mut DeviceState,
+    share: &mut super::state::ShareState,
 ) {
     tab.set_no_update(next);
     match next {
         super::state::Tab::Keyboard => device_enter(keys),
         super::state::Tab::Watch => device_enter(watch),
         super::state::Tab::Packages => {}
+        // 每次进 Share 页都重扫,保证列表新鲜。
+        super::state::Tab::Share => share_rescan(share),
     }
 }
 
