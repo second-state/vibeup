@@ -94,7 +94,8 @@ pub fn detect() -> Terminal {
     {
         return Terminal::Embedded;
     }
-    if std::env::var_os("VTE_VERSION").is_some() || std::env::var_os("GNOME_TERMINAL_SCREEN").is_some()
+    if std::env::var_os("VTE_VERSION").is_some()
+        || std::env::var_os("GNOME_TERMINAL_SCREEN").is_some()
     {
         return Terminal::Vte;
     }
@@ -116,15 +117,18 @@ pub fn detect() -> Terminal {
 /// 检测到的终端优先;二进制不在 PATH 上就沿候选链往下试。
 pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let detected = detect();
+    let shell = user_shell();
     let mut tried: Vec<String> = Vec::new();
-    for t in [detected]
-        .into_iter()
-        .chain(FALLBACKS.iter().copied())
-        // 去重(检测到的可能又在兜底链里)。
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-    {
-        let Some((bin, args)) = launch_for(t, cmd) else {
+    // 检测到的在最前,再按 FALLBACKS 声明顺序兜底;保持顺序去重(检测到的可能
+    // 又在兜底链里)。不能用 HashSet——那会让尝试顺序随机。
+    let mut candidates = vec![detected];
+    for t in FALLBACKS.iter().copied() {
+        if !candidates.contains(&t) {
+            candidates.push(t);
+        }
+    }
+    for t in candidates {
+        let Some((bin, args)) = launch_for(t, cmd, &shell) else {
             continue;
         };
         if !on_path(&bin) {
@@ -142,7 +146,12 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
         ),
         (
             "x-terminal-emulator",
-            vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), cmd.to_string()],
+            vec![
+                "-e".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                cmd.to_string(),
+            ],
         ),
     ] {
         if on_path(&bin) {
@@ -169,13 +178,39 @@ const FALLBACKS: &[Terminal] = &[
     Terminal::WezTerm,
 ];
 
+/// 用户当前 shell:`$SHELL`(缺省 /bin/sh)。
+fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// 用 `shell` 跑 `cmd` 的参数。zsh/bash/fish 以 **登录 + 交互** 模式启动:
+/// `-c` 的裸 sh 不读 rc 文件,`~/.cargo/bin`、homebrew 这些写在 .zshrc/.zprofile
+/// 里的 PATH 全会丢,命令就找不到了;登录+交互 shell 和用户平时打开的终端环境
+/// 一致。其他/未知 shell 退回 `sh -c`。
+fn shell_args(shell: &str, cmd: &str) -> Vec<String> {
+    let name = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match name {
+        "zsh" | "bash" | "fish" => {
+            vec![
+                shell.to_string(),
+                "-l".into(),
+                "-i".into(),
+                "-c".into(),
+                cmd.into(),
+            ]
+        }
+        _ => vec!["sh".into(), "-c".into(), cmd.into()],
+    }
+}
+
 /// 各终端的拉起参数(`cmd` 是 shell 命令行)。返回 None = 没有可靠的拉起方式。
-fn launch_for(t: Terminal, cmd: &str) -> Option<(String, Vec<String>)> {
+fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String>)> {
     let sh = |bin: &str, extra: &[&str]| {
         let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
-        args.push("sh".into());
-        args.push("-c".into());
-        args.push(cmd.into());
+        args.extend(shell_args(shell, cmd));
         Some((bin.to_string(), args))
     };
     match t {
@@ -193,7 +228,10 @@ fn launch_for(t: Terminal, cmd: &str) -> Option<(String, Vec<String>)> {
             let esc = cmd.replace('\\', "\\\\").replace('"', "\\\"");
             Some((
                 "osascript".into(),
-                vec!["-e".into(), format!("tell application \"Terminal\" to do script \"{esc}\"")],
+                vec![
+                    "-e".into(),
+                    format!("tell application \"Terminal\" to do script \"{esc}\""),
+                ],
             ))
         }
         Terminal::ITerm => {
@@ -240,29 +278,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_args_wrap_shell() {
-        let (bin, args) = launch_for(Terminal::Ghostty, "echo hi").unwrap();
+    fn launch_args_wrap_user_shell() {
+        // zsh/bash/fish 走登录+交互模式(读 rc,保住 PATH)。
+        let (bin, args) = launch_for(Terminal::Ghostty, "echo hi", "/bin/zsh").unwrap();
         assert_eq!(bin, "ghostty");
-        assert_eq!(args, vec!["-e", "sh", "-c", "echo hi"]);
+        assert_eq!(args, vec!["-e", "/bin/zsh", "-l", "-i", "-c", "echo hi"]);
 
-        let (bin, args) = launch_for(Terminal::Kitty, "echo hi").unwrap();
+        let (bin, args) = launch_for(Terminal::Kitty, "echo hi", "/bin/bash").unwrap();
         assert_eq!(bin, "kitty");
-        assert_eq!(args, vec!["--detach", "sh", "-c", "echo hi"]);
+        assert_eq!(
+            args,
+            vec!["--detach", "/bin/bash", "-l", "-i", "-c", "echo hi"]
+        );
 
-        let (bin, args) = launch_for(Terminal::Foot, "echo hi").unwrap();
+        let (bin, args) = launch_for(Terminal::Foot, "echo hi", "/usr/bin/fish").unwrap();
         assert_eq!(bin, "foot");
+        assert_eq!(args, vec!["/usr/bin/fish", "-l", "-i", "-c", "echo hi"]);
+
+        // 未知 shell 退回 sh -c。
+        let (bin, args) = launch_for(Terminal::Foot, "echo hi", "/bin/tcsh").unwrap();
         assert_eq!(args, vec!["sh", "-c", "echo hi"]);
     }
 
     #[test]
     fn embedded_and_unknown_have_no_launcher() {
-        assert!(launch_for(Terminal::Embedded, "x").is_none());
-        assert!(launch_for(Terminal::Unknown, "x").is_none());
+        assert!(launch_for(Terminal::Embedded, "x", "/bin/zsh").is_none());
+        assert!(launch_for(Terminal::Unknown, "x", "/bin/zsh").is_none());
     }
 
     #[test]
     fn apple_escapes_quotes() {
-        let (_, args) = launch_for(Terminal::AppleTerminal, "echo \"hi\"").unwrap();
+        let (_, args) = launch_for(Terminal::AppleTerminal, "echo \"hi\"", "/bin/zsh").unwrap();
         assert!(args[1].contains("do script \"echo \\\"hi\\\"\""));
     }
 
