@@ -10,6 +10,9 @@ mod install;
 mod pkg;
 mod share_manager;
 mod status;
+// 临时:调用方(Share 页动作)接线前未使用,接线后撤掉。
+#[allow(dead_code)]
+mod terminal;
 mod tui;
 
 use anyhow::Result;

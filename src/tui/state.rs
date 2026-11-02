@@ -12,24 +12,24 @@ use std::sync::{Arc, Mutex};
 
 // ===== 应用 =====
 
-/// 四个标签:键盘 / 手表(BLE 设备配置)+ 管理(vibetty / vibekeys 安装更新)
-/// + share(herdr 里的 vibetty 会话)。
+/// 四个标签:管理(vibetty / vibekeys 安装更新)+ share(herdr 里的会话)
+/// + 键盘 / 手表(BLE 设备配置)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Tab {
     #[default]
     Packages,
+    Share,
     Keyboard,
     Watch,
-    Share,
 }
 
 impl Tab {
     pub fn next(self) -> Self {
         match self {
-            Self::Packages => Self::Keyboard,
+            Self::Packages => Self::Share,
+            Self::Share => Self::Keyboard,
             Self::Keyboard => Self::Watch,
-            Self::Watch => Self::Share,
-            Self::Share => Self::Packages,
+            Self::Watch => Self::Packages,
         }
     }
 }

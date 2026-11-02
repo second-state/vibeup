@@ -325,9 +325,12 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let page_border = ratatui_kit::components::BorderProps {
         borders: Borders::ALL,
         border_style: Some(Style::new().dark_gray()),
-        // Share 页的内容框左上角标出来源。
+        // Share 页的内容框左上角显示检测到的终端(launch 用哪个就标哪个)。
         top_title: (tab_val == Tab::Share).then(|| {
-            Line::from(Span::styled(" Herdr ", Style::new().dark_gray()))
+            Line::from(Span::styled(
+                format!(" {} ", crate::terminal::detect().name()),
+                Style::new().dark_gray(),
+            ))
         }),
         children: page_children,
         ..Default::default()
@@ -370,20 +373,20 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 }
 
 fn tab_line(tab: Tab) -> Line<'static> {
-    let spans: Vec<Span> = [Tab::Packages, Tab::Keyboard, Tab::Watch, Tab::Share]
+    let spans: Vec<Span> = [Tab::Packages, Tab::Share, Tab::Keyboard, Tab::Watch]
         .iter()
         .map(|t| {
             let n = match t {
                 Tab::Packages => 1,
-                Tab::Keyboard => 2,
-                Tab::Watch => 3,
-                Tab::Share => 4,
+                Tab::Share => 2,
+                Tab::Keyboard => 3,
+                Tab::Watch => 4,
             };
             let name = match t {
                 Tab::Packages => "Packages",
+                Tab::Share => "Share",
                 Tab::Keyboard => "Keyboard",
                 Tab::Watch => "Watch",
-                Tab::Share => "Share",
             };
             let text = format!(" {n} {name} ");
             let style = if *t == tab {
@@ -924,10 +927,14 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
     let lines: Vec<Line<'static>> = if !st.checked {
         vec![Line::from(" checking herdr…")]
     } else if !st.installed {
-        vec![Line::from(Span::styled(
-            " herdr not found — install it to manage shared agent sessions",
-            Style::new().dark_gray(),
-        ))]
+        // 没有 herdr 不劝安装,直接给「起一个独立 vibetty 会话」的出口。
+        vec![
+            Line::from(" Start a standalone vibetty session:"),
+            option_line(
+                "Launch vibetty in a new terminal  ($ vibetty)".into(),
+                true,
+            ),
+        ]
     } else if let Some(e) = &st.err {
         vec![Line::from(Span::styled(
             format!(" {e}"),

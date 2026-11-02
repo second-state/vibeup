@@ -1002,16 +1002,16 @@ pub fn handle_key(
                 return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
             }
             KeyCode::Char('2') => {
+                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+            }
+            KeyCode::Char('3') => {
                 switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
             }
-            KeyCode::Char('3') => {
+            KeyCode::Char('4') => {
                 switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
-            }
-            KeyCode::Char('4') => {
-                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
@@ -1033,7 +1033,19 @@ pub fn handle_key(
                 message = format!("share — {} agent(s)", share.rows.len());
             }
             KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
-                if share.installed && !share.plugin {
+                // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话。
+                if !share.installed {
+                    if key.code == KeyCode::Char('d') {
+                        message = "share — nothing to unshare without herdr".into();
+                        return KeyOutcome::msg(message);
+                    }
+                    match crate::terminal::open_terminal("vibetty") {
+                        Ok(()) => message = "opened a new terminal running vibetty".into(),
+                        Err(e) => message = format!("{e:#}"),
+                    }
+                    return KeyOutcome::msg(message);
+                }
+                if !share.plugin {
                     message = "vibetty is not a herdr plugin — see the install hint above".into();
                     return KeyOutcome::msg(message);
                 }
@@ -1153,20 +1165,20 @@ pub fn handle_key(
         // 就绪页:切标签键优先(与旧版全局键一致),然后行导航/动作。
         match code {
             KeyCode::Char('1') => {
-                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
-            }
-            KeyCode::Char('2') => {
-                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
-            }
-            KeyCode::Char('3') => {
                 switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char('2') => {
                 switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
                 return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+            }
+            KeyCode::Char('3') => {
+                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+            }
+            KeyCode::Char('4') => {
+                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
@@ -1288,16 +1300,16 @@ pub fn handle_key(
             return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
         }
         KeyCode::Char('2') => {
+            switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+        }
+        KeyCode::Char('3') => {
             switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
             return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
         }
-        KeyCode::Char('3') => {
+        KeyCode::Char('4') => {
             switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
             return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
-        }
-        KeyCode::Char('4') => {
-            switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Share));
         }
         KeyCode::Tab => {
             let next = tab.get().next();
