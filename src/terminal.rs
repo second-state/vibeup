@@ -181,32 +181,39 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     if !on_path(bin) {
         anyhow::bail!("Windows Terminal (wt.exe) not found on PATH");
     }
-    let (shell, mut args) = windows_shell();
-    // 解析成绝对路径:新标签的 PATH 不一定继承到位,绝对路径不赌运气。
-    // 引号包住——wt 按空白切分命令行,路径里带空格也不散。
+    let (shell, flags) = windows_shell();
     let full = resolve_on_path(cmd)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| cmd.to_string());
-    args.push("new-tab".into());
-    args.push(shell);
-    args.push(format!("\"{full}\""));
-    spawn_detached(bin, &args)
+
+    // wt 对 new-tab 的参数解析会把 `-` 开头的东西当成自己的选项,把 shell
+    // 参数拆开传必挂("arguments were not expected: -NoLogo")。整条命令行
+    // 打包成**一个带引号的参数**交给 wt,它会把引号里的内容原样丢给
+    // CreateProcess;内嵌引号按 CommandLineToArgvW 规则用 \" 转义。
+    let mut commandline = shell;
+    for f in flags {
+        commandline.push(' ');
+        commandline.push_str(f);
+    }
+    commandline.push_str(&format!(" \\\"{full}\\\""));
+    let quoted = format!("\"{commandline}\"");
+    spawn_detached(bin, &["new-tab".into(), quoted])
 }
 
-/// 当前会话的 shell 与其执行前缀。PowerShell 会话必设 `PSMODULEPATH`,
+/// 当前会话的 shell 与其 flag。PowerShell 会话必设 `PSMODULEPATH`,
 /// 这种情况下优先 pwsh(PS7)→ powershell;否则用 `ComSpec`(默认 cmd)。
 #[cfg(windows)]
-fn windows_shell() -> (String, Vec<String>) {
+fn windows_shell() -> (String, Vec<&'static str>) {
     if std::env::var_os("PSMODULEPATH").is_some() {
         for bin in ["pwsh.exe", "powershell.exe"] {
             if on_path(bin) {
-                return (bin.to_string(), vec!["-NoLogo".into(), "-Command".into()]);
+                return (bin.to_string(), vec!["-NoLogo", "-Command"]);
             }
         }
     }
     (
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
-        vec!["/C".into()],
+        vec!["/C"],
     )
 }
 

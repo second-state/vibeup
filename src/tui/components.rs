@@ -312,7 +312,13 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 ))
                 .into(),
             ],
-            Tab::Share => vec![share_page_element(share)],
+            Tab::Share => {
+                #[cfg(unix)]
+                let el = share_page_element(share);
+                #[cfg(windows)]
+                let el = share_page_element();
+                vec![el]
+            }
         }
     };
     // 新用户询问框:盖在页区上方(与包菜单弹窗同款布局)。
@@ -998,6 +1004,8 @@ fn vibetty_launch_popup() -> AnyElement<'static> {
     el
 }
 
+/// agent 列表页(unix 专属;windows 的 Share 页只有 vibetty 弹窗)。
+#[cfg(unix)]
 #[derive(Props)]
 pub struct SharePageProps {
     pub state: State<super::state::ShareState>,
@@ -1034,7 +1042,8 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
-/// agent 状态的展示色。
+/// agent 状态的展示色(unix 专属;windows 没有列表页)。
+#[cfg(unix)]
 fn state_style(state: &str) -> Style {
     match state {
         "working" => Style::new().light_yellow(),
@@ -1050,7 +1059,8 @@ fn state_style(state: &str) -> Style {
 /// 进 tab 时已在 switch_to 里同步扫描。
 /// Share 页入口:windows 直接渲染「独立 vibetty 会话」弹窗;unix 走 herdr 页。
 pub fn share_page_element(
-    share: ratatui_kit::prelude::State<super::state::ShareState>,
+    // windows 不用 share(没有 herdr 列表),参数直接 cfg 掉。
+    #[cfg(unix)] share: ratatui_kit::prelude::State<super::state::ShareState>,
 ) -> AnyElement<'static> {
     #[cfg(windows)]
     let el: AnyElement<'static> = vibetty_launch_popup();
