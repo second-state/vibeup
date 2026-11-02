@@ -172,18 +172,60 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
 }
 
 /// windows:只支持 Windows Terminal。wt.exe 的应用执行别名在
-/// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH);新标签页里跑
-/// `cmd /C <cmd>`,命令退出即关标签。
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH)。新标签页里用
+/// **当前会话的 shell**(PowerShell 优先,兜底 ComSpec 即 cmd)跑 `cmd`;
+/// 命令解析成绝对路径传入,新标签的 PATH 环境无关紧要。命令退出即关标签。
 #[cfg(windows)]
 pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let bin = "wt.exe";
     if !on_path(bin) {
         anyhow::bail!("Windows Terminal (wt.exe) not found on PATH");
     }
-    spawn_detached(
-        bin,
-        &["new-tab".into(), "cmd".into(), "/C".into(), cmd.into()],
+    let (shell, mut args) = windows_shell();
+    // 解析成绝对路径:新标签的 PATH 不一定继承到位,绝对路径不赌运气。
+    // 引号包住——wt 按空白切分命令行,路径里带空格也不散。
+    let full = resolve_on_path(cmd)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| cmd.to_string());
+    args.push("new-tab".into());
+    args.push(shell);
+    args.push(format!("\"{full}\""));
+    spawn_detached(bin, &args)
+}
+
+/// 当前会话的 shell 与其执行前缀。PowerShell 会话必设 `PSMODULEPATH`,
+/// 这种情况下优先 pwsh(PS7)→ powershell;否则用 `ComSpec`(默认 cmd)。
+#[cfg(windows)]
+fn windows_shell() -> (String, Vec<String>) {
+    if std::env::var_os("PSMODULEPATH").is_some() {
+        for bin in ["pwsh.exe", "powershell.exe"] {
+            if on_path(bin) {
+                return (bin.to_string(), vec!["-NoLogo".into(), "-Command".into()]);
+            }
+        }
+    }
+    (
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
+        vec!["/C".into()],
     )
+}
+
+/// 在当前进程的 PATH 里解析命令的绝对路径(含不带/带 `.exe` 两种形态);
+/// 找不到返回 None,交由目标 shell 自己的 PATH 逻辑。
+#[cfg(windows)]
+fn resolve_on_path(cmd: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        let with_exe = dir.join(format!("{cmd}.exe"));
+        if with_exe.is_file() {
+            return Some(with_exe);
+        }
+    }
+    None
 }
 
 /// Share 页边框标题用的终端名:unix = 检测到的;windows = wt。
