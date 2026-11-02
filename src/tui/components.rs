@@ -240,7 +240,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
             if key.code == KeyCode::Char('w')
                 && mode.get() == Mode::Tabs
                 && tab.get() == Tab::Packages
-                && !pkg.read().menu.is_some()
+                && pkg.read().menu.is_none()
                 && !pkg.read().running
             {
                 *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
@@ -555,7 +555,7 @@ impl ratatui_kit::ratatui::widgets::Widget for RowsWidget {
 
         let height = area.height as usize;
         // 无状态滚动:只保证选中行可见。选中行在窗口内则贴顶,否则贴底。
-        let offset = if self.sel_line + 1 <= height || height == 0 {
+        let offset = if self.sel_line < height || height == 0 {
             0
         } else {
             self.sel_line + 1 - height
@@ -919,6 +919,78 @@ fn short(s: &str) -> &str {
 
 // ===== Share 页 =====
 
+/// 居中弹窗:「没有 herdr」时起独立 vibetty 会话的出口。
+/// 自绘 Widget(手动居中 + ratatui 原生渲染),与 keymap 弹窗同一套路。
+#[derive(Clone)]
+struct VibettyLaunchWidget;
+
+impl ratatui_kit::ratatui::widgets::Widget for VibettyLaunchWidget {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
+        use ratatui_kit::ratatui::{
+            layout::Rect,
+            text::Line,
+            widgets::{Clear, Paragraph},
+        };
+
+        let lines = [
+            Line::from(Span::styled(
+                " Start a standalone vibetty session:",
+                Style::new().bold(),
+            )),
+            Line::from(Span::styled(
+                " ❯ Launch vibetty in a new terminal  ($ vibetty)",
+                Style::new().light_blue().bold(),
+            )),
+        ];
+        // 宽度按最长行内容算(+ 边框 2),不写死:写窄了末行会被截断。
+        let content_w = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>() as u16
+            })
+            .max()
+            .unwrap_or(20);
+        let w = (content_w + 2).min(area.width.saturating_sub(2));
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+
+        Clear.render(rect, buf);
+        let block = ratatui_kit::ratatui::widgets::Block::bordered()
+            .title(Span::styled(" vibetty ", Style::new().bold()));
+        let inner = block.inner(rect);
+        block.render(rect, buf);
+        for (i, line) in lines.iter().enumerate() {
+            let row = Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            };
+            Paragraph::new(line.clone()).render(row, buf);
+        }
+    }
+}
+
+fn vibetty_launch_popup() -> AnyElement<'static> {
+    let el: AnyElement<'static> = element!(Center {
+        widget(VibettyLaunchWidget)
+    })
+    .into();
+    el
+}
+
 #[derive(Props)]
 pub struct SharePageProps {
     pub state: State<super::state::ShareState>,
@@ -953,14 +1025,12 @@ fn state_style(state: &str) -> Style {
 #[component]
 pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
     let st = props.state.read().clone();
+    if st.checked && !st.installed {
+        // 没有 herdr 不劝安装:直接给一个居中的「起独立 vibetty 会话」弹窗。
+        return vibetty_launch_popup();
+    }
     let lines: Vec<Line<'static>> = if !st.checked {
         vec![Line::from(" checking herdr…")]
-    } else if !st.installed {
-        // 没有 herdr 不劝安装,直接给「起一个独立 vibetty 会话」的出口。
-        vec![
-            Line::from(" Start a standalone vibetty session:"),
-            option_line("Launch vibetty in a new terminal  ($ vibetty)".into(), true),
-        ]
     } else if let Some(e) = &st.err {
         vec![Line::from(Span::styled(
             format!(" {e}"),

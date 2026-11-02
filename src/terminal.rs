@@ -26,7 +26,7 @@ pub enum Terminal {
     Vte,
     Konsole,
     WezTerm,
-    AppleTerminal,
+    Apple,
     ITerm,
     /// VSCode / JetBrains 内置终端:没有可靠的命令行拉起方式,当 Unknown 处理。
     Embedded,
@@ -44,7 +44,7 @@ impl Terminal {
             Self::Vte => "vte",
             Self::Konsole => "konsole",
             Self::WezTerm => "wezterm",
-            Self::AppleTerminal => "terminal.app",
+            Self::Apple => "terminal.app",
             Self::ITerm => "iterm",
             Self::Embedded => "embedded",
             Self::Unknown => "unknown",
@@ -70,7 +70,7 @@ pub fn detect() -> Terminal {
     match std::env::var("TERM_PROGRAM").as_deref() {
         Ok("ghostty") => return Terminal::Ghostty,
         Ok("WezTerm") => return Terminal::WezTerm,
-        Ok("Apple_Terminal") => return Terminal::AppleTerminal,
+        Ok("Apple_Terminal") => return Terminal::Apple,
         Ok("iTerm.app") => return Terminal::ITerm,
         Ok("vscode") | Ok("Hyper") | Ok("tabby") => return Terminal::Embedded,
         _ => {}
@@ -154,8 +154,8 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
             ],
         ),
     ] {
-        if on_path(&bin) {
-            spawn_detached(&bin, &args)?;
+        if on_path(bin) {
+            spawn_detached(bin, &args)?;
             return Ok(());
         }
         tried.push(bin.to_string());
@@ -223,7 +223,7 @@ fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String
         Terminal::Vte => sh("gnome-terminal", &["--"]),
         Terminal::Konsole => sh("konsole", &["-e"]),
         Terminal::WezTerm => sh("wezterm", &["start", "--"]),
-        Terminal::AppleTerminal => {
+        Terminal::Apple => {
             // AppleScript 双引号转义后塞进 do script。
             let esc = cmd.replace('\\', "\\\\").replace('"', "\\\"");
             Some((
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn apple_escapes_quotes() {
-        let (_, args) = launch_for(Terminal::AppleTerminal, "echo \"hi\"", "/bin/zsh").unwrap();
+        let (_, args) = launch_for(Terminal::Apple, "echo \"hi\"", "/bin/zsh").unwrap();
         assert!(args[1].contains("do script \"echo \\\"hi\\\"\""));
     }
 

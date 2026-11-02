@@ -1373,11 +1373,11 @@ pub fn wizard_key(
                 let vibetty_url = "mqtt://127.0.0.1:1883";
                 match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                     Ok(()) => {
-                        if !st.demo {
-                            if let Err(e) = set_vibetty_broker(vibetty_url) {
-                                st.err = Some(format!("vibetty config: {e:#}"));
-                                return Outcome::none();
-                            }
+                        if !st.demo
+                            && let Err(e) = set_vibetty_broker(vibetty_url)
+                        {
+                            st.err = Some(format!("vibetty config: {e:#}"));
+                            return Outcome::none();
                         }
                         st.log_line(format!("{} server_url = {url}", st.device.name()), true);
                         st.log_line(format!("vibetty broker = {vibetty_url}"), true);
@@ -1572,10 +1572,10 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
         if let Ok(p) = rt.progress.lock() {
             st.progress = Some((p.downloaded, p.total));
         }
-        if let Ok(o) = rt.output.lock() {
-            if st.output != *o {
-                st.output = o.clone();
-            }
+        if let Ok(o) = rt.output.lock()
+            && st.output != *o
+        {
+            st.output = o.clone();
         }
     }
 }
