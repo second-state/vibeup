@@ -1032,7 +1032,7 @@ pub fn handle_key(
         #[cfg(unix)]
         let msg_opt = share_keys_unix(share, &key);
         #[cfg(windows)]
-        let msg_opt = share_keys_windows(share);
+        let msg_opt = share_keys_windows(share, &key);
         if let Some(m) = msg_opt {
             message = m;
         }
@@ -1464,10 +1464,13 @@ fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Opti
 
 /// windows Share 页动作:没有 herdr,Enter/s 只起独立 vibetty 会话(仅 wt)。
 #[cfg(windows)]
-fn share_keys_windows(_share: &mut super::state::ShareState) -> Option<String> {
-    match crate::terminal::open_terminal("vibetty") {
-        Ok(()) => Some("opened a new terminal running vibetty".into()),
-        Err(e) => Some(format!("{e:#}")),
+fn share_keys_windows(_share: &mut super::state::ShareState, key: &KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Char('s') | KeyCode::Enter => match crate::terminal::open_terminal("vibetty") {
+            Ok(()) => Some("opened a new terminal running vibetty".into()),
+            Err(e) => Some(format!("{e:#}")),
+        },
+        _ => None,
     }
 }
 
