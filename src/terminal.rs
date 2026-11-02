@@ -15,7 +15,8 @@
 
 use std::process::{Command, Stdio};
 
-/// 识别出的终端(多路复用器不算——见模块注释)。
+/// 识别出的终端(多路复用器不算——见模块注释)。unix 专属:windows 只支持 wt。
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Terminal {
     Kitty,
@@ -34,6 +35,7 @@ pub enum Terminal {
 }
 
 /// 终端名(小写,给 UI 展示用)。
+#[cfg(unix)]
 impl Terminal {
     pub fn name(self) -> &'static str {
         match self {
@@ -53,6 +55,7 @@ impl Terminal {
 }
 
 /// 当前所在的多路复用器(zellij / tmux / screen)。
+#[cfg(unix)]
 pub fn multiplexer() -> Option<&'static str> {
     if std::env::var_os("ZELLIJ").is_some() {
         Some("zellij")
@@ -66,6 +69,7 @@ pub fn multiplexer() -> Option<&'static str> {
 }
 
 /// 按环境变量猜当前终端。
+#[cfg(unix)]
 pub fn detect() -> Terminal {
     match std::env::var("TERM_PROGRAM").as_deref() {
         Ok("ghostty") => return Terminal::Ghostty,
@@ -115,6 +119,7 @@ pub fn detect() -> Terminal {
 
 /// 在新终端窗口里跑 `cmd`(shell 命令行,经 `sh -c` 执行)。
 /// 检测到的终端优先;二进制不在 PATH 上就沿候选链往下试。
+#[cfg(unix)]
 pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let detected = detect();
     let shell = user_shell();
@@ -166,8 +171,35 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     )
 }
 
+/// windows:只支持 Windows Terminal。wt.exe 的应用执行别名在
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH);新标签页里跑
+/// `cmd /C <cmd>`,命令退出即关标签。
+#[cfg(windows)]
+pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
+    let bin = "wt.exe";
+    if !on_path(bin) {
+        anyhow::bail!("Windows Terminal (wt.exe) not found on PATH");
+    }
+    spawn_detached(
+        bin,
+        &["new-tab".into(), "cmd".into(), "/C".into(), cmd.into()],
+    )
+}
+
+/// Share 页边框标题用的终端名:unix = 检测到的;windows = wt。
+#[cfg(unix)]
+pub fn active_name() -> &'static str {
+    detect().name()
+}
+
+#[cfg(windows)]
+pub fn active_name() -> &'static str {
+    "wt"
+}
+
 /// 候选兜底链(检测不到 / 检测到的没装时按序试)。
 /// Windows Terminal 不在链里:windows 平台单独做。
+#[cfg(unix)]
 const FALLBACKS: &[Terminal] = &[
     Terminal::Kitty,
     Terminal::Ghostty,
@@ -179,6 +211,7 @@ const FALLBACKS: &[Terminal] = &[
 ];
 
 /// 用户当前 shell:`$SHELL`(缺省 /bin/sh)。
+#[cfg(unix)]
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
@@ -187,6 +220,7 @@ fn user_shell() -> String {
 /// `-c` 的裸 sh 不读 rc 文件,`~/.cargo/bin`、homebrew 这些写在 .zshrc/.zprofile
 /// 里的 PATH 全会丢,命令就找不到了;登录+交互 shell 和用户平时打开的终端环境
 /// 一致。其他/未知 shell 退回 `sh -c`。
+#[cfg(unix)]
 fn shell_args(shell: &str, cmd: &str) -> Vec<String> {
     let name = std::path::Path::new(shell)
         .file_name()
@@ -207,6 +241,7 @@ fn shell_args(shell: &str, cmd: &str) -> Vec<String> {
 }
 
 /// 各终端的拉起参数(`cmd` 是 shell 命令行)。返回 None = 没有可靠的拉起方式。
+#[cfg(unix)]
 fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String>)> {
     let sh = |bin: &str, extra: &[&str]| {
         let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
@@ -278,7 +313,7 @@ fn on_path(bin: &str) -> bool {
     std::env::split_paths(&path).any(|d| d.join(bin).is_file())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

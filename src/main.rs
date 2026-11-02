@@ -8,6 +8,9 @@ mod ble;
 mod config_cmd;
 mod install;
 mod pkg;
+/// herdr 集成是 unix(macOS/Linux)专属;Windows 的 Share 页只提供
+/// 「新终端跑 vibetty」,不检测 herdr。
+#[cfg(unix)]
 mod share_manager;
 mod status;
 // 临时:调用方(Share 页动作)接线前未使用,接线后撤掉。

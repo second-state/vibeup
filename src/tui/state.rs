@@ -636,14 +636,18 @@ pub struct PkgState {
 pub struct ShareState {
     /// 进 tab 时做过一次检测。
     pub checked: bool,
+    /// herdr 已安装(unix);windows 恒为 false(Share 页只走独立 vibetty)。
     pub installed: bool,
     /// vibetty 是否已注册为 herdr plugin(没有就 share 不了,页面给出安装命令)。
+    #[cfg(unix)]
     pub plugin: bool,
     /// herdr 在但查询失败(每个 session 的错误合并)。
     pub err: Option<String>,
     /// agent 行(跨所有 running session)。
+    #[cfg(unix)]
     pub rows: Vec<crate::share_manager::herdr::AgentRow>,
     /// 当前 vibetty share 会话(重扫时同步拉;列表展示用)。
+    #[cfg(unix)]
     pub shared: Vec<crate::share_manager::Session>,
     pub sel: usize,
 }

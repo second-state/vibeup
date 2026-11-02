@@ -312,7 +312,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 ))
                 .into(),
             ],
-            Tab::Share => vec![element!(SharePage(..SharePageProps { state: share })).into()],
+            Tab::Share => vec![share_page_element(share)],
         }
     };
     // 新用户询问框:盖在页区上方(与包菜单弹窗同款布局)。
@@ -336,7 +336,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         // Share 页的内容框左上角显示检测到的终端(launch 用哪个就标哪个)。
         top_title: (tab_val == Tab::Share).then(|| {
             Line::from(Span::styled(
-                format!(" {} ", crate::terminal::detect().name()),
+                format!(" {} ", crate::terminal::active_name()),
                 Style::new().dark_gray(),
             ))
         }),
@@ -1022,6 +1022,21 @@ fn state_style(state: &str) -> Style {
 
 /// herdr 里的 agent 列表:title / session / agent / state 四列,
 /// 进 tab 时已在 switch_to 里同步扫描。
+/// Share 页入口:windows 直接渲染「独立 vibetty 会话」弹窗;unix 走 herdr 页。
+pub fn share_page_element(
+    share: ratatui_kit::prelude::State<super::state::ShareState>,
+) -> AnyElement<'static> {
+    #[cfg(windows)]
+    let el: AnyElement<'static> = vibetty_launch_popup();
+    #[cfg(unix)]
+    let el: AnyElement<'static> = {
+        let props = SharePageProps { state: share };
+        element!(SharePage(..props)).into()
+    };
+    el
+}
+
+#[cfg(unix)]
 #[component]
 pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
     let st = props.state.read().clone();

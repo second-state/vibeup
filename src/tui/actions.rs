@@ -1026,72 +1026,15 @@ pub fn handle_key(
                     exit: true,
                 };
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                share.sel = (share.sel + 1).min(share.rows.len().saturating_sub(1));
-            }
-            KeyCode::Char('k') | KeyCode::Up => share.sel = share.sel.saturating_sub(1),
-            KeyCode::Char('r') => {
-                share_rescan(share);
-                message = format!("share — {} agent(s)", share.rows.len());
-            }
-            KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
-                // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话。
-                if !share.installed {
-                    if key.code == KeyCode::Char('d') {
-                        message = "share — nothing to unshare without herdr".into();
-                        return KeyOutcome::msg(message);
-                    }
-                    match crate::terminal::open_terminal("vibetty") {
-                        Ok(()) => message = "opened a new terminal running vibetty".into(),
-                        Err(e) => message = format!("{e:#}"),
-                    }
-                    return KeyOutcome::msg(message);
-                }
-                if !share.plugin {
-                    message = "vibetty is not a herdr plugin — see the install hint above".into();
-                    return KeyOutcome::msg(message);
-                }
-                let Some(row) = share.rows.get(share.sel) else {
-                    message = "share — nothing selected".into();
-                    return KeyOutcome::msg(message);
-                };
-                let target = row.pane_id.clone();
-                // d = 强制取消(实时查);s/Enter = toggle(按上次扫描的缓存)。
-                let already = (key.code != KeyCode::Char('d')).then(|| {
-                    share
-                        .shared
-                        .iter()
-                        .find(|s| s.target == target)
-                        .map(|s| s.pane_id.clone())
-                });
-                let already = match already {
-                    Some(v) => v,
-                    None => crate::share_manager::list()
-                        .ok()
-                        .and_then(|v| v.into_iter().find(|s| s.target == target))
-                        .map(|s| s.pane_id),
-                };
-                if let Some(id) = already {
-                    match crate::share_manager::close(&id) {
-                        Ok(()) => {
-                            share_rescan(share);
-                            message = format!("unshared {target}");
-                        }
-                        Err(e) => message = format!("unshare failed: {e:#}"),
-                    }
-                } else if key.code == KeyCode::Char('d') {
-                    message = format!("{target} is not shared");
-                } else {
-                    match crate::share_manager::share(&target) {
-                        Ok(id) => {
-                            share_rescan(share);
-                            message = format!("shared {target} → {id}");
-                        }
-                        Err(e) => message = format!("share failed: {e:#}"),
-                    }
-                }
-            }
             _ => {}
+        }
+        // 平台各自的 Share 页按键(unix = herdr 集成;windows = 仅独立 vibetty)。
+        #[cfg(unix)]
+        let msg_opt = share_keys_unix(share, &key);
+        #[cfg(windows)]
+        let msg_opt = share_keys_windows(share);
+        if let Some(m) = msg_opt {
+            message = m;
         }
         return KeyOutcome::msg(std::mem::take(&mut message));
     }
@@ -1394,6 +1337,9 @@ fn switch_tab(
 /// 进 Share 页:检测 herdr 并同步扫描 agent 列表(几次进程调用,毫秒级)。
 /// 环境变量 `DEMO` 可模拟不同样式:`herdr_uninstall`(herdr 没装)、
 /// `herdr_no_vibetty_plugin`(herdr 在但没装 vibetty plugin)。
+/// Share 页重扫:unix = 检测 herdr + 拉 agent 列表;windows = 无 herdr,
+/// 恒走「独立 vibetty 会话」。
+#[cfg(unix)]
 fn share_rescan(share: &mut super::state::ShareState) {
     share.checked = true;
     share.sel = 0;
@@ -1432,6 +1378,97 @@ fn share_rescan(share: &mut super::state::ShareState) {
     }
     // share 状态拉取失败不挡列表(显示成没 share);d 动作会用实时 list 兜底。
     share.shared = crate::share_manager::list().unwrap_or_default();
+}
+
+/// windows:没有 herdr,恒为「未安装」,页面只给独立 vibetty 出口。
+#[cfg(windows)]
+fn share_rescan(share: &mut super::state::ShareState) {
+    share.checked = true;
+    share.sel = 0;
+    share.err = None;
+    share.installed = false;
+}
+
+/// unix Share 页动作(j/k/r/s/Enter/d,完整 herdr 集成)。Some = footer 消息。
+#[cfg(unix)]
+fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            share.sel = (share.sel + 1).min(share.rows.len().saturating_sub(1));
+            None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            share.sel = share.sel.saturating_sub(1);
+            None
+        }
+        KeyCode::Char('r') => {
+            share_rescan(share);
+            Some(format!("share — {} agent(s)", share.rows.len()))
+        }
+        KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
+            // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话。
+            if !share.installed {
+                if key.code == KeyCode::Char('d') {
+                    return Some("share — nothing to unshare without herdr".into());
+                }
+                return match crate::terminal::open_terminal("vibetty") {
+                    Ok(()) => Some("opened a new terminal running vibetty".into()),
+                    Err(e) => Some(format!("{e:#}")),
+                };
+            }
+            if !share.plugin {
+                return Some("vibetty is not a herdr plugin — see the install hint above".into());
+            }
+            let Some(row) = share.rows.get(share.sel) else {
+                return Some("share — nothing selected".into());
+            };
+            let target = row.pane_id.clone();
+            // d = 强制取消(实时查);s/Enter = toggle(按上次扫描的缓存)。
+            let already = (key.code != KeyCode::Char('d')).then(|| {
+                share
+                    .shared
+                    .iter()
+                    .find(|s| s.target == target)
+                    .map(|s| s.pane_id.clone())
+            });
+            let already = match already {
+                Some(v) => v,
+                None => crate::share_manager::list()
+                    .ok()
+                    .and_then(|v| v.into_iter().find(|s| s.target == target))
+                    .map(|s| s.pane_id),
+            };
+            if let Some(id) = already {
+                match crate::share_manager::close(&id) {
+                    Ok(()) => {
+                        share_rescan(share);
+                        Some(format!("unshared {target}"))
+                    }
+                    Err(e) => Some(format!("unshare failed: {e:#}")),
+                }
+            } else if key.code == KeyCode::Char('d') {
+                Some(format!("{target} is not shared"))
+            } else {
+                match crate::share_manager::share(&target) {
+                    Ok(id) => {
+                        share_rescan(share);
+                        Some(format!("shared {target} → {id}"))
+                    }
+                    Err(e) => Some(format!("share failed: {e:#}")),
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// windows Share 页动作:没有 herdr,Enter/s 只起独立 vibetty 会话(仅 wt)。
+#[cfg(windows)]
+fn share_keys_windows(_share: &mut super::state::ShareState) -> Option<String> {
+    match crate::terminal::open_terminal("vibetty") {
+        Ok(()) => Some("opened a new terminal running vibetty".into()),
+        Err(e) => Some(format!("{e:#}")),
+    }
 }
 
 fn switch_to(
