@@ -188,25 +188,39 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     if !on_path(bin) {
         anyhow::bail!("Windows Terminal (wt.exe) not found on PATH");
     }
-    let full = resolve_on_path(cmd)
+    let mut full = resolve_on_path(cmd)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| cmd.to_string());
+    // 转 8.3 短路径:保证不含空格,后面就不需要任何内层引号
+    // (wt 对含空格的参数会二次包裹,带引号必挂 0x80070057)。
+    full = short_path(&full);
 
     // PowerShell 会话:cmd /c 链进 pwsh(PS7)→ powershell。
-    if parent_is_pwsh() {
-        let quoted = format!("\"cmd /c pwsh.exe -NoLogo -Command \\\"{full}\\\"\"");
-        return spawn_detached(bin, &["new-tab".into(), quoted]);
+    // 整条命令行作为**单个不含引号的参数**传给 wt——wt 会自己包一层引号,
+    // CreateProcess 正常解析 `cmd /c pwsh.exe ...`;内层引号只会坏事。
+    let commandline = if parent_is_pwsh() {
+        format!("cmd /c pwsh.exe -NoLogo -Command {full}")
+    } else {
+        format!("cmd /C {full}")
+    };
+    spawn_detached(bin, &["new-tab".into(), commandline])
+}
+
+/// 8.3 短路径(去空格);卷不支持 8.3 名时原样返回。
+#[cfg(windows)]
+fn short_path(p: &str) -> String {
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = p.encode_utf16().collect();
+    let need = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if need == 0 {
+        return p.to_string();
     }
-    // 非 PS(cmd 或未知):cmd /C 直接跑,wt 解析器对 /C 开头无感。
-    spawn_detached(
-        bin,
-        &[
-            "new-tab".into(),
-            "cmd".into(),
-            "/C".into(),
-            format!("\"{full}\""),
-        ],
-    )
+    let mut buf = vec![0u16; need as usize];
+    let got = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), need) };
+    if got == 0 {
+        return p.to_string();
+    }
+    String::from_utf16_lossy(&buf[..got as usize])
 }
 
 /// 父进程是不是 PowerShell?env 启发式(PSMODULEPATH)不可靠——cmd 下也会
