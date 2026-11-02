@@ -933,6 +933,19 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
             format!(" {e}"),
             Style::new().red(),
         ))]
+    } else if !st.plugin {
+        // herdr 在,但 vibetty 没注册成 plugin:share 动作开不了 pane,给出安装命令。
+        vec![
+            Line::from(" vibetty is not installed as a herdr plugin."),
+            Line::from(Span::styled(
+                " install it with:",
+                Style::new().dark_gray(),
+            )),
+            Line::from(Span::styled(
+                "   $ herdr plugin install second-state/vibetty",
+                Style::new().light_blue(),
+            )),
+        ]
     } else if st.rows.is_empty() {
         vec![Line::from(Span::styled(
             " no herdr agents running",

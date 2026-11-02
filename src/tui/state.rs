@@ -640,6 +640,8 @@ pub struct ShareState {
     /// 进 tab 时做过一次检测。
     pub checked: bool,
     pub installed: bool,
+    /// vibetty 是否已注册为 herdr plugin(没有就 share 不了,页面给出安装命令)。
+    pub plugin: bool,
     /// herdr 在但查询失败(每个 session 的错误合并)。
     pub err: Option<String>,
     /// agent 行(跨所有 running session)。

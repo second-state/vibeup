@@ -103,6 +103,36 @@ pub fn agents(session: &str) -> Result<Vec<AgentRow>> {
         .collect())
 }
 
+/// vibetty 是否已注册为 herdr plugin(`herdr plugin list --json` 里找
+/// `plugin_id == "vibetty"`;share 动作要靠它开 plugin pane)。
+pub fn plugin_installed() -> Result<bool> {
+    let out = herdr(&["plugin", "list", "--json"])?;
+    parse_plugins(&out)
+}
+
+/// [`plugin_installed`] 的解析内核(可单测)。
+fn parse_plugins(s: &str) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Out {
+        result: Body,
+    }
+    #[derive(Deserialize)]
+    struct Body {
+        #[serde(default)]
+        plugins: Vec<Plug>,
+    }
+    #[derive(Deserialize)]
+    struct Plug {
+        plugin_id: String,
+    }
+    let parsed: Out = serde_json::from_str(s).context("parse `herdr plugin list --json`")?;
+    Ok(parsed
+        .result
+        .plugins
+        .iter()
+        .any(|p| p.plugin_id == "vibetty"))
+}
+
 /// 便捷:所有 running session 的 agent,session 顺序拼接。
 /// 单个 session 查询失败不炸整个扫描(记入 Err 汇总)。
 pub fn scan() -> Result<Vec<AgentRow>> {
@@ -165,6 +195,18 @@ mod tests {
             .map(|x| x.name)
             .collect();
         assert_eq!(names, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn plugin_detection_by_id() {
+        let s = r#"{"result":{"plugins":[
+            {"plugin_id":"ramarivera.palette"},
+            {"plugin_id":"vibetty"}
+        ]}}"#;
+        assert!(parse_plugins(s).unwrap());
+        let none = r#"{"result":{"plugins":[{"plugin_id":"vibegate"}]}}"#;
+        assert!(!parse_plugins(none).unwrap());
+        assert!(parse_plugins("garbage").is_err());
     }
 
     #[test]

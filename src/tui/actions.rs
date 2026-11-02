@@ -1032,18 +1032,31 @@ pub fn handle_key(
                 share_rescan(share);
                 message = format!("share — {} agent(s)", share.rows.len());
             }
-            KeyCode::Char('s') | KeyCode::Enter => {
+            KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
+                if share.installed && !share.plugin {
+                    message = "vibetty is not a herdr plugin — see the install hint above".into();
+                    return KeyOutcome::msg(message);
+                }
                 let Some(row) = share.rows.get(share.sel) else {
                     message = "share — nothing selected".into();
                     return KeyOutcome::msg(message);
                 };
                 let target = row.pane_id.clone();
-                // toggle:已 share(按上次扫描的缓存)→ 取消;没 share → 开 share。
-                let already = share
-                    .shared
-                    .iter()
-                    .find(|s| s.target == target)
-                    .map(|s| s.pane_id.clone());
+                // d = 强制取消(实时查);s/Enter = toggle(按上次扫描的缓存)。
+                let already = (key.code != KeyCode::Char('d')).then(|| {
+                    share
+                        .shared
+                        .iter()
+                        .find(|s| s.target == target)
+                        .map(|s| s.pane_id.clone())
+                });
+                let already = match already {
+                    Some(v) => v,
+                    None => crate::share_manager::list()
+                        .ok()
+                        .and_then(|v| v.into_iter().find(|s| s.target == target))
+                        .map(|s| s.pane_id),
+                };
                 if let Some(id) = already {
                     match crate::share_manager::close(&id) {
                         Ok(()) => {
@@ -1052,6 +1065,8 @@ pub fn handle_key(
                         }
                         Err(e) => message = format!("unshare failed: {e:#}"),
                     }
+                } else if key.code == KeyCode::Char('d') {
+                    message = format!("{target} is not shared");
                 } else {
                     match crate::share_manager::share(&target) {
                         Ok(id) => {
@@ -1060,27 +1075,6 @@ pub fn handle_key(
                         }
                         Err(e) => message = format!("share failed: {e:#}"),
                     }
-                }
-            }
-            KeyCode::Char('d') => {
-                let Some(row) = share.rows.get(share.sel) else {
-                    message = "share — nothing selected".into();
-                    return KeyOutcome::msg(message);
-                };
-                let target = row.pane_id.clone();
-                // 找到该 agent 当前的 share pane(可能没有)。
-                let shared = crate::share_manager::list()
-                    .map(|v| v.into_iter().find(|s| s.target == target));
-                match shared {
-                    Ok(Some(s)) => match crate::share_manager::close(&s.pane_id) {
-                        Ok(()) => {
-                            share_rescan(share);
-                            message = format!("unshared {target}");
-                        }
-                        Err(e) => message = format!("unshare failed: {e:#}"),
-                    },
-                    Ok(None) => message = format!("{target} is not shared"),
-                    Err(e) => message = format!("share list failed: {e:#}"),
                 }
             }
             _ => {}
@@ -1386,16 +1380,40 @@ fn switch_tab(
 }
 
 /// 进 Share 页:检测 herdr 并同步扫描 agent 列表(几次进程调用,毫秒级)。
+/// 环境变量 `DEMO` 可模拟不同样式:`herdr_uninstall`(herdr 没装)、
+/// `herdr_no_vibetty_plugin`(herdr 在但没装 vibetty plugin)。
 fn share_rescan(share: &mut super::state::ShareState) {
     share.checked = true;
     share.sel = 0;
     share.err = None;
+    share.shared.clear();
+    match std::env::var("DEMO").as_deref() {
+        Ok("herdr_uninstall") => {
+            share.installed = false;
+            share.rows.clear();
+            return;
+        }
+        Ok("herdr_no_vibetty_plugin") => {
+            share.installed = true;
+            share.plugin = false;
+            share.rows.clear();
+            return;
+        }
+        _ => {}
+    }
     if !crate::share_manager::herdr::installed() {
         share.installed = false;
         share.rows.clear();
         return;
     }
     share.installed = true;
+    match crate::share_manager::herdr::plugin_installed() {
+        Ok(v) => share.plugin = v,
+        Err(e) => {
+            share.plugin = false;
+            share.err = Some(format!("{e:#}"));
+        }
+    }
     match crate::share_manager::herdr::scan() {
         Ok(rows) => share.rows = rows,
         Err(e) => share.err = Some(format!("{e:#}")),
