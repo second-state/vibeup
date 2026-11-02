@@ -548,14 +548,6 @@ pub fn fetch_entries(entries: &mut [Entry], dir: &Path) {
 }
 
 /// 窄屏下的紧凑文案。
-pub fn short_status(s: &str) -> &str {
-    match s {
-        "update available" => "update",
-        "not installed" => "-",
-        other => other,
-    }
-}
-
 /// 按词折行(空格分词),长句适配固定框宽;超长单词硬放一行。
 pub fn wrap_words(s: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();

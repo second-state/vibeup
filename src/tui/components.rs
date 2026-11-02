@@ -770,12 +770,26 @@ pub struct PackagesPageProps {
 #[component]
 pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>> {
     let st = props.state.read().clone();
+    // 按终端宽度分列:package/installed/latest/pre 固定,status 吃剩余宽度
+    // (窗口拉宽它就跟着变宽)。行与表头都用 fit()(显示宽截断/补齐),
+    // CJK 与长文本不会顶歪后列。
+    let term_w = ratatui_kit::crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(120);
+    let w_pkg = 11usize;
+    let w_inst = 15usize;
+    let w_latest = 12usize;
+    let w_pre = 13usize;
+    let w_status = term_w
+        .saturating_sub(4)
+        .saturating_sub(w_pkg + w_inst + w_latest + w_pre + 3)
+        .max(10);
     let header = Line::from(vec![
-        Span::styled(format!("{:<12}", "package"), Style::new().bold()),
-        Span::styled(format!("{:<8}", "inst"), Style::new().bold()),
-        Span::styled(format!("{:<10}", "latest"), Style::new().bold()),
-        Span::styled(format!("{:<12}", "pre"), Style::new().bold()),
-        Span::styled("status", Style::new().bold()),
+        Span::styled(fit("package", w_pkg), Style::new().bold()),
+        Span::styled(fit("installed", w_inst), Style::new().bold()),
+        Span::styled(fit("latest", w_latest), Style::new().bold()),
+        Span::styled(fit("pre", w_pre), Style::new().bold()),
+        Span::styled(fit("status", w_status), Style::new().bold()),
     ]);
     let mut lines: Vec<Line<'static>> = vec![header, Line::from("")];
     for (i, e) in st.entries.iter().enumerate() {
@@ -786,17 +800,14 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
         let status = e.status(props.allow_pre);
         let selected = i == st.sel;
         let line = Line::from(vec![
-            Span::raw(format!("{:<12}", e.pkg.name)),
-            Span::raw(format!("{:<8}", short(installed.as_str()))),
-            Span::raw(format!(
-                "{:<10}",
-                e.latest.clone().unwrap_or_else(|| "?".into())
+            Span::raw(fit(e.pkg.name, w_pkg)),
+            Span::raw(fit(&installed, w_inst)),
+            Span::raw(fit(
+                &e.latest.clone().unwrap_or_else(|| "?".into()),
+                w_latest,
             )),
-            Span::raw(format!(
-                "{:<12}",
-                e.any.clone().unwrap_or_else(|| "-".into())
-            )),
-            Span::raw(short(status).to_string()),
+            Span::raw(fit(&e.any.clone().unwrap_or_else(|| "-".into()), w_pre)),
+            Span::raw(fit(status, w_status)),
         ]);
         lines.push(if selected {
             line.style(Style::new().bg(Color::DarkGray))
@@ -911,10 +922,6 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
     };
     let el: AnyElement<'static> = element!(View(..vp)).into();
     el
-}
-
-fn short(s: &str) -> &str {
-    super::state::short_status(s)
 }
 
 // ===== Share 页 =====
