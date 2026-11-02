@@ -427,7 +427,10 @@ impl Session {
                 let _ = ev_tx.send(SessionEvent::Disconnected(e));
             }
         });
-        Self { cmd_tx, events: ev_rx }
+        Self {
+            cmd_tx,
+            events: ev_rx,
+        }
     }
 
     /// 非阻塞收一条事件。
@@ -453,7 +456,9 @@ impl Session {
         match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(res) => res,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                anyhow::bail!("device did not respond within 5s — it may be stuck or rebooting; the write may still have been applied")
+                anyhow::bail!(
+                    "device did not respond within 5s — it may be stuck or rebooting; the write may still have been applied"
+                )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("device session is closed")
@@ -567,7 +572,11 @@ async fn serve_cmd(
         SessionCmd::ConfigRead { reply } => {
             let _ = reply.send(read_config(p).await);
         }
-        SessionCmd::ConfigWrite { field, value, reply } => {
+        SessionCmd::ConfigWrite {
+            field,
+            value,
+            reply,
+        } => {
             let _ = reply.send(write_config_field(p, &field, value).await);
         }
         SessionCmd::KeymapWrite { payload, reply } => {

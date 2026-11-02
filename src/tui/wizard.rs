@@ -7,7 +7,7 @@
 
 use super::actions::scan_devices_thread;
 use super::demo;
-use super::state::{wrap_words, DownloadProgress, Input, SharedProgress};
+use super::state::{DownloadProgress, Input, SharedProgress, wrap_words};
 use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
 use crate::install;
@@ -465,11 +465,7 @@ fn wiz_write_field(
     }
 }
 
-fn wiz_write_keymap(
-    rt: &mut WizardRuntime,
-    key: &str,
-    binding: &str,
-) -> anyhow::Result<()> {
+fn wiz_write_keymap(rt: &mut WizardRuntime, key: &str, binding: &str) -> anyhow::Result<()> {
     let Some(session) = rt.session.as_ref() else {
         if rt.mock.is_null() {
             anyhow::bail!("device not connected");
@@ -558,7 +554,10 @@ fn start_install(st: &mut WizardState, rt: &mut WizardRuntime, kind: JobKind) {
                 // vibekeys 装完顺带跑它的 install-script:jump 脚本落到
                 // ~/.vibekeys/scripts,插件 hook 链依赖它。幂等,本地秒级。
                 if is_vibekeys && !dry_run {
-                    match std::process::Command::new(&bin).arg("install-script").output() {
+                    match std::process::Command::new(&bin)
+                        .arg("install-script")
+                        .output()
+                    {
                         Ok(o) if o.status.success() => {
                             log.push_str("jump script installed\n");
                         }
@@ -606,7 +605,10 @@ fn push_line(sink: &SharedLines, line: &str) {
         return;
     }
     let mut g = sink.lock().unwrap();
-    g.push(format!("  │ {}", clean.chars().take(90).collect::<String>()));
+    g.push(format!(
+        "  │ {}",
+        clean.chars().take(90).collect::<String>()
+    ));
     let len = g.len();
     if len > 80 {
         g.drain(..len - 80);
@@ -667,7 +669,11 @@ fn install_plugin(cli: &str, action: &str, label: &str, sink: &SharedLines) -> S
         &["plugin", "marketplace", "add", "second-state/marketplace"],
         sink,
     );
-    let ok2 = stream_cmd(cli, &["plugin", action, "vibekeys@second-state-tools"], sink);
+    let ok2 = stream_cmd(
+        cli,
+        &["plugin", action, "vibekeys@second-state-tools"],
+        sink,
+    );
     if ok1 && ok2 {
         format!("{label} plugin installed")
     } else {
@@ -763,7 +769,12 @@ fn vibetty_check(st: &mut WizardState, _rt: &mut WizardRuntime, dir: &Path) {
 }
 
 /// 14/14a/15:当前设备写 server-url + 主机 vibetty config 写 broker。
-fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String, vibetty_url: &str) {
+fn apply_broker(
+    st: &mut WizardState,
+    rt: &mut WizardRuntime,
+    device_url: String,
+    vibetty_url: &str,
+) {
     if let Err(e) = wiz_write_field(st, rt, "server_url", serde_json::json!(device_url)) {
         st.err = Some(format!("{e:#}"));
         return;
@@ -809,7 +820,11 @@ fn goto(st: &mut WizardState, step: Step) {
     st.err = None;
     if matches!(
         step,
-        Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
+        Step::HotkeyCapture
+            | Step::AsrApi
+            | Step::WifiForm
+            | Step::TailscaleKey
+            | Step::BrokerInput
     ) {
         prep_form(st);
     }
@@ -829,7 +844,11 @@ fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
     } else {
         if matches!(
             prev,
-            Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
+            Step::HotkeyCapture
+                | Step::AsrApi
+                | Step::WifiForm
+                | Step::TailscaleKey
+                | Step::BrokerInput
         ) {
             prep_form(st);
         }
@@ -983,12 +1002,7 @@ pub fn wizard_key(
                         }
                     }
                     let n = list.len();
-                    let res = wiz_write_field(
-                        st,
-                        rt,
-                        "wifi_list",
-                        ble::wifi_list_to_json(&list),
-                    );
+                    let res = wiz_write_field(st, rt, "wifi_list", ble::wifi_list_to_json(&list));
                     match res {
                         Ok(()) => {
                             st.log_line(
@@ -1060,15 +1074,18 @@ pub fn wizard_key(
                 // 捕捉为组合文本(Ctrl+A);特殊键(F1/方向键/Space)也捕捉。
                 match key.code {
                     KeyCode::Char(c)
-                        if key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META) =>
+                        if key.modifiers.intersects(
+                            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META,
+                        ) =>
                     {
                         let mut combo = String::new();
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
                             combo.push_str("Ctrl+");
                         }
-                        if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META) {
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::ALT | KeyModifiers::META)
+                        {
                             combo.push_str("Alt+");
                         }
                         combo.push(c.to_ascii_uppercase());
@@ -1217,9 +1234,8 @@ pub fn wizard_key(
                     let ips = local_ips();
                     match ips.len() {
                         0 => {
-                            st.err = Some(
-                                "could not detect the LAN IP — is the machine online?".into(),
-                            );
+                            st.err =
+                                Some("could not detect the LAN IP — is the machine online?".into());
                         }
                         1 => {
                             apply_broker(
@@ -1268,11 +1284,14 @@ pub fn wizard_key(
                 } else {
                     let pick = st.choice;
                     prep_form(st);
-                    goto(st, if pick == 0 {
-                        Step::TailscaleKey
-                    } else {
-                        Step::BrokerInput
-                    });
+                    goto(
+                        st,
+                        if pick == 0 {
+                            Step::TailscaleKey
+                        } else {
+                            Step::BrokerInput
+                        },
+                    );
                     // BrokerInput 的说明文字按来源区分(1 = emqx)。
                     st.choice = pick;
                 }
@@ -1360,10 +1379,7 @@ pub fn wizard_key(
                                 return Outcome::none();
                             }
                         }
-                        st.log_line(
-                            format!("{} server_url = {url}", st.device.name()),
-                            true,
-                        );
+                        st.log_line(format!("{} server_url = {url}", st.device.name()), true);
                         st.log_line(format!("vibetty broker = {vibetty_url}"), true);
                         if st.device != DeviceKind::VibeKeys {
                             st.watch_done = true;
@@ -1491,9 +1507,8 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                     st.pick_sel = 0;
                 }
                 Ok(_) => {
-                    st.err = Some(
-                        "no devices found — press ACCEPT on the device, then Enter".into(),
-                    );
+                    st.err =
+                        Some("no devices found — press ACCEPT on the device, then Enter".into());
                 }
                 Err(e) => st.err = Some(format!("{e:#} — Enter to scan again")),
             },
@@ -1684,12 +1699,7 @@ fn step_screen(st: &WizardState) -> Screen {
         // 长错误按词折行,避免固定框宽截断。
         let mut text: Vec<Line> = wrap_words(err, 50)
             .iter()
-            .map(|l| {
-                Line::from(Span::styled(
-                    format!(" {l} "),
-                    err_style().bold(),
-                ))
-            })
+            .map(|l| Line::from(Span::styled(format!(" {l} "), err_style().bold())))
             .collect();
         if text.is_empty() {
             text.push(Line::from(""));
@@ -1740,9 +1750,7 @@ fn step_screen(st: &WizardState) -> Screen {
                         DeviceKind::VibeKeys => dim_text(
                             "not found? boot the keyboard into Keyboard mode, press ACCEPT, then wait",
                         ),
-                        _ => dim_text(
-                            "not found? put the device in provisioning mode, then wait",
-                        ),
+                        _ => dim_text("not found? put the device in provisioning mode, then wait"),
                     },
                 ];
             } else {
@@ -1753,10 +1761,8 @@ fn step_screen(st: &WizardState) -> Screen {
                     .enumerate()
                     .map(|(i, dev)| option_line(dev.name.clone(), i == st.pick_sel))
                     .collect();
-                s.body.push(option_line(
-                    "← Back".into(),
-                    st.pick_sel == st.pick.len(),
-                ));
+                s.body
+                    .push(option_line("← Back".into(), st.pick_sel == st.pick.len()));
                 s.hint = vec![hint_line("↑↓ choose · Enter connect · Esc quit")];
             }
         }
@@ -1846,12 +1852,15 @@ fn step_screen(st: &WizardState) -> Screen {
                 )),
                 Line::from(""),
             ];
-            s.body.extend(choices_with_back(st, &["Yes — run the commands", "Skip"]));
+            s.body
+                .extend(choices_with_back(st, &["Yes — run the commands", "Skip"]));
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::InstallVibettyAsk => {
             s.title = "wizard — vibetty".into();
-            s.text = vec![text_line("Install vibetty (remote control for your agent)?")];
+            s.text = vec![text_line(
+                "Install vibetty (remote control for your agent)?",
+            )];
             let skip = if st.device == DeviceKind::VibeKeys {
                 "Skip — no remote control"
             } else {
@@ -1904,10 +1913,7 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![
                 field_line("auth-key", &st.input, st.choice == 0),
-                option_line(
-                    "Skip — already set up on the device".into(),
-                    st.choice == 1,
-                ),
+                option_line("Skip — already set up on the device".into(), st.choice == 1),
             ];
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
@@ -1922,9 +1928,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 .ip_choices
                 .iter()
                 .enumerate()
-                .map(|(i, ip)| {
-                    option_line(broker_with_host(&base, ip), i == st.choice)
-                })
+                .map(|(i, ip)| option_line(broker_with_host(&base, ip), i == st.choice))
                 .collect();
             s.body.push(option_line(
                 "← Back".into(),
@@ -1940,9 +1944,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Install tailscale and run `tailscale up`, then:"),
             ];
             s.body = vec![];
-            s.hint = vec![
-                hint_line("Enter/r retry · e broker · Esc quit"),
-            ];
+            s.hint = vec![hint_line("Enter/r retry · e broker · Esc quit")];
         }
         Step::BrokerInput => {
             s.title = "wizard — broker address".into();
@@ -2017,7 +2019,10 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
             .max()
             .unwrap_or(20) as u16
             + 4;
-        let w = W_TEXT.max(content_w).clamp(40, 100).min(area.width.saturating_sub(2));
+        let w = W_TEXT
+            .max(content_w)
+            .clamp(40, 100)
+            .min(area.width.saturating_sub(2));
         let h_text = H_TEXT_INNER.max(scr.text.len() as u16) + 2;
         let h_body = if has_body {
             scr.body.len() as u16 + 2
@@ -2035,8 +2040,19 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
         let y = area.y + (area.height.saturating_sub(total)) / 2;
 
         // 说明框(title 框)。
-        let rect1 = Rect { x, y, width: w, height: h_text };
-        draw_box(rect1, &format!(" {} ", scr.title), &scr.text, scr.alert, buf);
+        let rect1 = Rect {
+            x,
+            y,
+            width: w,
+            height: h_text,
+        };
+        draw_box(
+            rect1,
+            &format!(" {} ", scr.title),
+            &scr.text,
+            scr.alert,
+            buf,
+        );
 
         // 操作框(选项/输入)。
         if has_body {
@@ -2070,8 +2086,7 @@ fn draw_box(
     buf: &mut ratatui_kit::ratatui::buffer::Buffer,
 ) {
     let border_style = if alert { err_style() } else { Style::new() };
-    let mut block = ratatui_kit::ratatui::widgets::Block::bordered()
-        .border_style(border_style);
+    let mut block = ratatui_kit::ratatui::widgets::Block::bordered().border_style(border_style);
     if !title.is_empty() {
         block = block.title(Span::styled(
             title.to_string(),
@@ -2144,10 +2159,13 @@ pub fn WizardApp(props: &WizardAppProps, mut hooks: Hooks) -> impl Into<AnyEleme
     }
 
     let st = state.read().clone();
-    let screen = WizardScreen { screen: step_screen(&st) };
+    let screen = WizardScreen {
+        screen: step_screen(&st),
+    };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(screen)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -2175,10 +2193,13 @@ fn is_new_user_in(dir: &Path, home: &Path) -> bool {
 
 /// 渲染当前向导画面(嵌入 TUI 标签页模式时用;独立 WizardApp 也走这里)。
 pub fn view(st: &WizardState) -> AnyElement<'static> {
-    let screen = WizardScreen { screen: step_screen(st) };
+    let screen = WizardScreen {
+        screen: step_screen(st),
+    };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(screen)
-    }).into();
+    })
+    .into();
     el
 }
 

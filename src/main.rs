@@ -220,7 +220,11 @@ fn main() -> Result<()> {
         }
         Cmd::Update { name, pre } => update(name.as_deref(), pre, &cli.dir, cli.dry_run),
         Cmd::Uninstall { name } => {
-            let p = if name == "self" { &pkg::SELF } else { pkg::find(&name)? };
+            let p = if name == "self" {
+                &pkg::SELF
+            } else {
+                pkg::find(&name)?
+            };
             let log = install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()), cli.dry_run)?;
             print!("{log}");
             Ok(())
@@ -232,9 +236,8 @@ fn main() -> Result<()> {
 fn run_config(cmd: ConfigCmd, dry_run: bool) -> Result<()> {
     use config_cmd::{AsrOpts, WifiAction};
     // CLI direct connect: no specific device, connect to first of the scanned kind.
-    let parse_device = |s: &str| -> Result<ble::Target> {
-        Ok(ble::Target::auto(ble::DeviceKind::parse(s)?))
-    };
+    let parse_device =
+        |s: &str| -> Result<ble::Target> { Ok(ble::Target::auto(ble::DeviceKind::parse(s)?)) };
     match cmd {
         ConfigCmd::Show { device } => config_cmd::show(parse_device(&device)?),
         ConfigCmd::Wifi { device, cmd } => {

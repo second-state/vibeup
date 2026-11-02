@@ -51,15 +51,16 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let mut ask_choice: State<usize> = hooks.use_state(|| 0);
     // 嵌入式向导的状态与后台句柄。
     let wiz = hooks.use_state(|| super::wizard::WizardState::new(props.demo, props.dry_run));
-    let wiz_rt: State<std::sync::Arc<std::sync::Mutex<super::wizard::WizardRuntime>>> =
-        hooks.use_state(|| std::sync::Arc::new(std::sync::Mutex::new(
-            super::wizard::WizardRuntime::default(),
-        )));
+    let wiz_rt: State<std::sync::Arc<std::sync::Mutex<super::wizard::WizardRuntime>>> = hooks
+        .use_state(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(
+                super::wizard::WizardRuntime::default(),
+            ))
+        });
     let keys = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::VibeKeys, props.demo));
     let watch = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::Watch, props.demo));
-    let runtimes = hooks.use_state(|| {
-        std::sync::Arc::new(std::sync::Mutex::new(super::state::Runtimes::new()))
-    });
+    let runtimes = hooks
+        .use_state(|| std::sync::Arc::new(std::sync::Mutex::new(super::state::Runtimes::new())));
     let pkg = hooks.use_state(super::state::PkgState::default);
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
@@ -107,7 +108,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 {
                     let rts_arc = runtimes.read().clone();
                     let mut rts = rts_arc.lock().unwrap();
-                    let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
+                    let super::state::Runtimes {
+                        keys: rt_keys,
+                        watch: rt_watch,
+                    } = &mut *rts;
                     let mut ks = keys.write();
                     if let Some(m) = actions::poll_job(&mut ks, rt_keys) {
                         msg = msg.or(Some(m));
@@ -158,11 +162,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 };
                 if refresh_now {
                     let dir = dir.clone();
-                    let entries = tokio::task::spawn_blocking(move || {
-                        super::state::refresh_entries(&dir)
-                    })
-                    .await
-                    .unwrap_or_default();
+                    let entries =
+                        tokio::task::spawn_blocking(move || super::state::refresh_entries(&dir))
+                            .await
+                            .unwrap_or_default();
                     let mut ps = pkg.write();
                     ps.entries = entries;
                     ps.sel = ps.sel.min(ps.entries.len().saturating_sub(1));
@@ -195,16 +198,14 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 
             // 嵌入式向导:吞掉所有按键;退出向导 → 回标签页 + 刷新包表。
             if mode.get() == Mode::Wizard {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     exit();
                     return EventResult::Consumed;
                 }
                 let wrt_arc = wiz_rt.read().clone();
                 let mut wrt = wrt_arc.lock().unwrap();
                 let mut wst = wiz.write();
-                let outcome =
-                    super::wizard::wizard_key(&mut wst, &mut wrt, &key, &dir);
+                let outcome = super::wizard::wizard_key(&mut wst, &mut wrt, &key, &dir);
                 if outcome.exit {
                     mode.set_no_update(Mode::Tabs);
                     pkg.write().refresh_pending = true;
@@ -225,8 +226,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                         if yes {
                             *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
                             let wrt_arc = wiz_rt.read().clone();
-                            *wrt_arc.lock().unwrap() =
-                                super::wizard::WizardRuntime::default();
+                            *wrt_arc.lock().unwrap() = super::wizard::WizardRuntime::default();
                             mode.set_no_update(Mode::Wizard);
                         }
                     }
@@ -252,7 +252,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 
             let rts_arc = runtimes.read().clone();
             let mut rts = rts_arc.lock().unwrap();
-            let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
+            let super::state::Runtimes {
+                keys: rt_keys,
+                watch: rt_watch,
+            } = &mut *rts;
             let mut ks = keys.write();
             let mut ws = watch.write();
             let mut ps = pkg.write();
@@ -300,10 +303,15 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         match tab_val {
             Tab::Keyboard => vec![element!(DevicePage(..DevicePageProps { state: keys })).into()],
             Tab::Watch => vec![element!(DevicePage(..DevicePageProps { state: watch })).into()],
-            Tab::Packages => vec![element!(PackagesPage(..PackagesPageProps {
-                state: pkg,
-                allow_pre: allow_pre.get(),
-            })).into()],
+            Tab::Packages => vec![
+                element!(PackagesPage(
+                    ..PackagesPageProps {
+                        state: pkg,
+                        allow_pre: allow_pre.get(),
+                    }
+                ))
+                .into(),
+            ],
             Tab::Share => vec![element!(SharePage(..SharePageProps { state: share })).into()],
         }
     };
@@ -474,7 +482,8 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
     let w = RowsWidget { lines, sel_line };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(w)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -495,7 +504,12 @@ mod rows_widget_tests {
 
     fn render_lines(count: usize, sel_line: usize, height: u16) -> Vec<String> {
         let lines: Vec<Line> = (0..count).map(|i| Line::from(format!("row {i}"))).collect();
-        let area = Rect { x: 0, y: 0, width: 20, height };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height,
+        };
         let mut buf = ratatui_kit::ratatui::buffer::Buffer::empty(area);
         RowsWidget { lines, sel_line }.render(area, &mut buf);
         (0..height)
@@ -600,7 +614,7 @@ fn row_line(
 fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
     let frame = SPINNER[st.spin % SPINNER.len()];
     let (title, mut lines, alert, content_w): (String, Vec<Line>, bool, usize) = match &st.conn {
-        Conn::Ready => return element!(Fragment { }).into(),
+        Conn::Ready => return element!(Fragment {}).into(),
         Conn::Fresh => (
             " scan ".into(),
             vec![
@@ -655,13 +669,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
                 " Found {} device(s) — pick one to configure:",
                 st.pick.len()
             ))];
-            let w = st
-                .pick
-                .iter()
-                .map(|d| d.name.len())
-                .max()
-                .unwrap_or(10)
-                + 34;
+            let w = st.pick.iter().map(|d| d.name.len()).max().unwrap_or(10) + 34;
             for (i, d) in st.pick.iter().enumerate() {
                 lines.push(option_line(d.name.clone(), i == st.pick_sel));
             }
@@ -703,12 +711,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             30,
         ),
     };
-    if st.demo
-        && matches!(
-            st.conn,
-            Conn::Scanning | Conn::Pick | Conn::Connecting(_)
-        )
-    {
+    if st.demo && matches!(st.conn, Conn::Scanning | Conn::Pick | Conn::Connecting(_)) {
         lines.push(Line::from(Span::styled(" (demo fake devices)", dim())));
     }
     let title_ref: &str = &title;
@@ -718,7 +721,12 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
 // ===== 公共渲染小件 =====
 
 /// 居中模态框:四边边框 + 标题,宽度按内容预估,红框告警态。
-fn modal(title: &str, lines: Vec<Line<'static>>, alert: bool, content_w: usize) -> AnyElement<'static> {
+fn modal(
+    title: &str,
+    lines: Vec<Line<'static>>,
+    alert: bool,
+    content_w: usize,
+) -> AnyElement<'static> {
     let h = lines.len() as u16 + 2;
     let w = (content_w as u16 + 4).clamp(22, 120);
     let border_style = if alert { err_style() } else { Style::new() };
@@ -771,14 +779,23 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
     ]);
     let mut lines: Vec<Line<'static>> = vec![header, Line::from("")];
     for (i, e) in st.entries.iter().enumerate() {
-        let installed = e.installed.clone().unwrap_or_else(|| "not installed".into());
+        let installed = e
+            .installed
+            .clone()
+            .unwrap_or_else(|| "not installed".into());
         let status = e.status(props.allow_pre);
         let selected = i == st.sel;
         let line = Line::from(vec![
             Span::raw(format!("{:<12}", e.pkg.name)),
             Span::raw(format!("{:<8}", short(installed.as_str()))),
-            Span::raw(format!("{:<10}", e.latest.clone().unwrap_or_else(|| "?".into()))),
-            Span::raw(format!("{:<12}", e.any.clone().unwrap_or_else(|| "-".into()))),
+            Span::raw(format!(
+                "{:<10}",
+                e.latest.clone().unwrap_or_else(|| "?".into())
+            )),
+            Span::raw(format!(
+                "{:<12}",
+                e.any.clone().unwrap_or_else(|| "-".into())
+            )),
             Span::raw(short(status).to_string()),
         ]);
         lines.push(if selected {
@@ -794,9 +811,7 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
         for (i, (cli, _, label)) in ask.clis.iter().enumerate() {
             let check = if ask.checked[i] { "[x]" } else { "[ ]" };
             let sel = if i == ask.sel { "❯" } else { " " };
-            ask_lines.push(Line::from(format!(
-                " {sel} {check} {label} plugin ({cli})"
-            )));
+            ask_lines.push(Line::from(format!(" {sel} {check} {label} plugin ({cli})")));
         }
         ask_lines.push(Line::from(""));
         ask_lines.push(Line::from(Span::styled(
@@ -808,7 +823,8 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesMenuModal(title: String::from(" agent plugins "), lines: ask_lines)
-        }).into()
+        })
+        .into()
     } else if let Some(m) = &st.menu {
         let e = st.entries.get(m.pkg);
         let (latest, any, title) = match e {
@@ -844,14 +860,20 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesMenuModal(title: title, lines: menu_lines)
-        }).into()
+        })
+        .into()
     } else if st.running {
         let frame = SPINNER[st.spin % SPINNER.len()];
         let mb = |b: u64| format!("{:.1} MB", b as f64 / 1024.0 / 1024.0);
         let progress_line = match st.progress {
             Some((done, Some(total))) => {
                 let pct = done.checked_mul(100).map_or(0, |n| n / total.max(1));
-                format!(" {frame} {}…  {} / {} ({pct}%)", st.job_label, mb(done), mb(total))
+                format!(
+                    " {frame} {}…  {} / {} ({pct}%)",
+                    st.job_label,
+                    mb(done),
+                    mb(total)
+                )
             }
             Some((done, None)) => {
                 format!(" {frame} {}…  {} downloaded", st.job_label, mb(done))
@@ -863,13 +885,17 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesWorkingModal(line: progress_line)
-        }).into()
+        })
+        .into()
     } else {
         let mut children: Vec<AnyElement<'static>> = Vec::new();
         for line in lines {
-            children.push(element!(View(height: Constraint::Length(1)) {
-                Text(text: line)
-            }).into());
+            children.push(
+                element!(View(height: Constraint::Length(1)) {
+                    Text(text: line)
+                })
+                .into(),
+            );
         }
         let vp = ratatui_kit::components::ViewProps {
             flex_direction: Direction::Vertical,
@@ -903,7 +929,10 @@ fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
-        format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            s.chars().take(n.saturating_sub(1)).collect::<String>()
+        )
     }
 }
 
@@ -930,10 +959,7 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
         // 没有 herdr 不劝安装,直接给「起一个独立 vibetty 会话」的出口。
         vec![
             Line::from(" Start a standalone vibetty session:"),
-            option_line(
-                "Launch vibetty in a new terminal  ($ vibetty)".into(),
-                true,
-            ),
+            option_line("Launch vibetty in a new terminal  ($ vibetty)".into(), true),
         ]
     } else if let Some(e) = &st.err {
         vec![Line::from(Span::styled(
@@ -944,10 +970,7 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
         // herdr 在,但 vibetty 没注册成 plugin:share 动作开不了 pane,给出安装命令。
         vec![
             Line::from(" vibetty is not installed as a herdr plugin."),
-            Line::from(Span::styled(
-                " install it with:",
-                Style::new().dark_gray(),
-            )),
+            Line::from(Span::styled(" install it with:", Style::new().dark_gray())),
             Line::from(Span::styled(
                 "   $ herdr plugin install second-state/vibetty",
                 Style::new().light_blue(),
@@ -1029,7 +1052,11 @@ impl ratatui_kit::ratatui::widgets::Widget for KeymapModalWidget {
 }
 
 impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
-    fn render(self, area: ratatui_kit::ratatui::layout::Rect, buf: &mut ratatui_kit::ratatui::buffer::Buffer) {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
         use ratatui_kit::ratatui::{
             text::Line,
             widgets::{Clear, Paragraph},
@@ -1057,7 +1084,11 @@ impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
             } else {
                 Span::raw(binding.clone())
             };
-            let key_style = if selected { Style::new().bold() } else { Style::new() };
+            let key_style = if selected {
+                Style::new().bold()
+            } else {
+                Style::new()
+            };
             lines.push(Line::from(vec![
                 Span::raw(format!(" {marker} ")),
                 Span::styled(format!("{key:<10}"), key_style),
@@ -1072,16 +1103,29 @@ impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
         let h = (lines.len() as u16 + 2).min(area.height);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(h)) / 2;
-        let rect = ratatui_kit::ratatui::layout::Rect { x, y, width: w, height: h };
+        let rect = ratatui_kit::ratatui::layout::Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
 
         Clear.render(rect, buf);
         let block = ratatui_kit::ratatui::widgets::Block::bordered()
             .title(Span::styled(
                 " keymap ",
-                if alert { Style::new().red() } else { Style::new() }
-                    .add_modifier(Modifier::BOLD),
+                if alert {
+                    Style::new().red()
+                } else {
+                    Style::new()
+                }
+                .add_modifier(Modifier::BOLD),
             ))
-            .border_style(if alert { Style::new().red() } else { Style::new() });
+            .border_style(if alert {
+                Style::new().red()
+            } else {
+                Style::new()
+            });
         let inner = block.inner(rect);
         block.render(rect, buf);
         for (i, line) in lines.iter().enumerate() {
@@ -1104,7 +1148,8 @@ fn keymap_modal(st: &DeviceState, km: &super::state::KeymapPopupState) -> AnyEle
     };
     let el: AnyElement<'static> = element!(Center {
         widget(w)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -1160,18 +1205,10 @@ pub struct PackagesMenuModalProps {
     pub lines: Vec<Line<'static>>,
 }
 
-
 #[component]
 pub fn PackagesMenuModal(props: &PackagesMenuModalProps) -> impl Into<AnyElement<'static>> {
     let h = props.lines.len() as u16 + 2;
-    let w = (props
-        .lines
-        .iter()
-        .map(|l| l.width())
-        .max()
-        .unwrap_or(20) as u16
-        + 4)
-        .clamp(22, 120);
+    let w = (props.lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 4).clamp(22, 120);
     element!(Center(width: Constraint::Length(w), height: Constraint::Length(h)) {
         Border(
             borders: Borders::ALL,

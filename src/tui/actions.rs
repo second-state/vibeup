@@ -3,19 +3,20 @@
 //! 要么丢后台线程(Job/PkgJob),要么由调用方 `tokio::spawn` + spawn_blocking。
 
 use crate::ble::{self, DeviceKind, FoundDevice, SessionEvent, Target};
-use btleplug::api::{Central as _, Manager as _, Peripheral as _};
 use crate::config_cmd;
 use crate::install;
-use crate::pkg::{self, Pkg, PKGS, SELF};
-use anyhow::{bail, Result};
+use crate::pkg::{self, PKGS, Pkg, SELF};
+use anyhow::{Result, bail};
+use btleplug::api::{Central as _, Manager as _, Peripheral as _};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::demo;
 use super::state::{
-    Conn, DeviceRuntime, DeviceState, Entry, Field, next_in_cycle, KEYMAP_KEYS, keymap_binding, PkgMenu, PkgRuntime,
-    PkgState, PopupKind, PopupState, RowAction, SharedProgress, DownloadProgress, PKG_MENU_ITEMS,
+    Conn, DeviceRuntime, DeviceState, DownloadProgress, Entry, Field, KEYMAP_KEYS, PKG_MENU_ITEMS,
+    PkgMenu, PkgRuntime, PkgState, PopupKind, PopupState, RowAction, SharedProgress,
+    keymap_binding, next_in_cycle,
 };
 
 // ===== 后台任务基建(线程 + channel)=====
@@ -205,9 +206,7 @@ fn start_plugin_install(
         move || {
             let results: Vec<String> = picks
                 .iter()
-                .map(|(cli, action, label)| {
-                    install_plugin_cli(cli, action, label)
-                })
+                .map(|(cli, action, label)| install_plugin_cli(cli, action, label))
                 .collect();
             PkgJobOut::PluginsDone(results)
         },
@@ -259,7 +258,8 @@ pub fn install_pkg(
     state.running = true;
     state.vibekeys_pending = pkg.name == "vibekeys";
     state.progress = None;
-    let progress: SharedProgress = std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
+    let progress: SharedProgress =
+        std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
     let tick_progress = progress.clone();
     let job_progress = progress.clone();
     rt.job = Some(spawn_pkg_job(job_progress, move || {
@@ -317,7 +317,8 @@ pub fn update_all(state: &mut PkgState, rt: &mut PkgRuntime, dir: &Path, dry_run
     state.job_label = "update all".into();
     state.running = true;
     state.progress = None;
-    let progress: SharedProgress = std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
+    let progress: SharedProgress =
+        std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
     let tick_progress = progress.clone();
     let job_progress = progress.clone();
     rt.job = Some(spawn_pkg_job(job_progress, move || {
@@ -365,7 +366,9 @@ pub fn poll_pkg_job(
     }
     let out = job.try_recv();
     rt.job = None;
-    rt.progress = std::sync::Arc::new(std::sync::Mutex::new(super::state::DownloadProgress::default()));
+    rt.progress = std::sync::Arc::new(std::sync::Mutex::new(
+        super::state::DownloadProgress::default(),
+    ));
     state.running = false;
     state.progress = None;
     match out {
@@ -535,11 +538,7 @@ pub fn poll_session(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Option<S
     Some(on_session_event(state, rt, ev))
 }
 
-fn on_session_event(
-    state: &mut DeviceState,
-    rt: &mut DeviceRuntime,
-    ev: SessionEvent,
-) -> String {
+fn on_session_event(state: &mut DeviceState, rt: &mut DeviceRuntime, ev: SessionEvent) -> String {
     match ev {
         SessionEvent::Ready(res) => on_connect_result(state, rt, res),
         SessionEvent::Disconnected(e) => {
@@ -612,9 +611,7 @@ pub fn keymap_popup_key(
             KeyCode::Enter => {
                 let binding = input.buf.trim().to_string();
                 if binding.is_empty() {
-                    return Some(
-                        "binding must not be empty — type one or Esc to cancel".into(),
-                    );
+                    return Some("binding must not be empty — type one or Esc to cancel".into());
                 }
                 let keyname = KEYMAP_KEYS[*idx];
                 let res = do_keymap(demo, rt, keyname, &binding);
@@ -631,44 +628,50 @@ pub fn keymap_popup_key(
             }
             KeyCode::Backspace => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.backspace();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.backspace();
+                }
                 return None;
             }
             KeyCode::Delete => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.delete();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.delete();
+                }
                 return None;
             }
             KeyCode::Left => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.left();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.left();
+                }
                 return None;
             }
             KeyCode::Right => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.right();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.right();
+                }
                 return None;
             }
             KeyCode::Home => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.home();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.home();
+                }
                 return None;
             }
             KeyCode::End => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.end();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.end();
+                }
                 return None;
             }
             KeyCode::Char(c) => {
@@ -747,10 +750,14 @@ pub fn keymap_popup_key(
 }
 
 /// 动作成功后的善后:重读配置,失败顶 footer。
-fn after_action(demo: bool, state: &mut DeviceState, rt: &mut DeviceRuntime, ok: bool, message: &mut String) {
-    if ok
-        && let Some(err) = load_config(demo, state, rt)
-    {
+fn after_action(
+    demo: bool,
+    state: &mut DeviceState,
+    rt: &mut DeviceRuntime,
+    ok: bool,
+    message: &mut String,
+) {
+    if ok && let Some(err) = load_config(demo, state, rt) {
         *message = format!("read failed: {err}");
     }
 }
@@ -867,12 +874,7 @@ pub fn do_field(
 }
 
 /// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机读-改-写整个列表。
-pub fn do_wifi_add(
-    demo: bool,
-    rt: &mut DeviceRuntime,
-    ssid: &str,
-    pass: &str,
-) -> Result<()> {
+pub fn do_wifi_add(demo: bool, rt: &mut DeviceRuntime, ssid: &str, pass: &str) -> Result<()> {
     if ssid.trim().is_empty() {
         bail!("ssid must not be empty");
     }
@@ -1366,9 +1368,7 @@ fn tab_message(t: super::state::Tab) -> String {
         super::state::Tab::Keyboard => {
             "vibekeys — Enter run/edit · r re-read config · Esc quit".into()
         }
-        super::state::Tab::Watch => {
-            "watch — Enter run/edit · r re-read config · Esc quit".into()
-        }
+        super::state::Tab::Watch => "watch — Enter run/edit · r re-read config · Esc quit".into(),
         super::state::Tab::Packages => {
             "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
                 .into()
@@ -1690,12 +1690,7 @@ fn wifi_remove_action(
     after_action(demo, state, rt, res.is_ok(), message);
 }
 
-fn row_action(
-    state: &mut DeviceState,
-    rt: &mut DeviceRuntime,
-    demo: bool,
-    message: &mut String,
-) {
+fn row_action(state: &mut DeviceState, rt: &mut DeviceRuntime, demo: bool, message: &mut String) {
     // 克隆动作,免得借用 rows 卡住后面的 &mut 方法。
     let action = state.rows[state.sel].action.clone();
     match action {

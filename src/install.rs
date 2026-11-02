@@ -73,7 +73,11 @@ pub fn install(
 
     std::fs::create_dir_all(dir)?;
     // 清掉之前被杀进程留下的 staging 残留(每次 pid 不同,不会自愈)。
-    for e in std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()) {
+    for e in std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+    {
         if e.file_name()
             .to_str()
             .is_some_and(|n| n.starts_with(&format!(".vibeup.{}.", pkg.name)))
@@ -187,7 +191,8 @@ fn download(url: &str, dest: &Path, progress: &ProgressFn) -> Result<()> {
     use std::io::{Read, Write};
     let mut resp = pkg::send_get(url)?.error_for_status()?;
     let total = resp.content_length();
-    let mut file = std::fs::File::create(dest).map_err(|e| anyhow!("write {}: {e}", dest.display()))?;
+    let mut file =
+        std::fs::File::create(dest).map_err(|e| anyhow!("write {}: {e}", dest.display()))?;
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     loop {

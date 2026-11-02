@@ -588,11 +588,8 @@ pub struct PkgMenu {
 }
 
 /// 菜单选项文案(下标即执行分支)。
-pub const PKG_MENU_ITEMS: [&str; 3] = [
-    "Install / update latest",
-    "Install prerelease",
-    "Uninstall",
-];
+pub const PKG_MENU_ITEMS: [&str; 3] =
+    ["Install / update latest", "Install prerelease", "Uninstall"];
 
 /// 下载进度快照(后台线程写,UI 每 100ms 读一次)。
 #[derive(Clone, Copy, Default)]
@@ -675,7 +672,6 @@ pub struct DeviceState {
     /// keymap 编辑弹窗(键位列表 + 行内编辑)。
     pub keymap_popup: Option<KeymapPopupState>,
 }
-
 
 impl DeviceState {
     pub fn new(kind: DeviceKind, demo: bool) -> Self {

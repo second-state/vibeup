@@ -38,7 +38,11 @@ pub fn wifi(target: Target, action: WifiAction, reset: bool, dry: bool) -> Resul
     // dry-run:不连设备,只报意图;Set 的 JSON 校验照做(离线可查)。
     match &action {
         WifiAction::Add { ssid, .. } if dry => {
-            println!("would add wifi `{}' to the list{}", ssid, reboot_note(reset));
+            println!(
+                "would add wifi `{}' to the list{}",
+                ssid,
+                reboot_note(reset)
+            );
             return Ok(());
         }
         WifiAction::Remove { ssid } if dry => {
