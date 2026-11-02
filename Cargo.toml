@@ -24,3 +24,6 @@ uuid = "1"
 # (与 vibekeys_app 的 musl 配置一致)
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 dbus = { version = "0.9", features = ["vendored"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console"] }

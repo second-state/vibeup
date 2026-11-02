@@ -172,49 +172,79 @@ pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
 }
 
 /// windows:只支持 Windows Terminal。wt.exe 的应用执行别名在
-/// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH)。新标签页里用
-/// **当前会话的 shell**(PowerShell 优先,兜底 ComSpec 即 cmd)跑 `cmd`;
-/// 命令解析成绝对路径传入,新标签的 PATH 环境无关紧要。命令退出即关标签。
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`(默认在用户 PATH)。
+///
+/// 新标签页里用**父进程的 shell** 跑 `cmd`,命令解析成绝对路径传入,
+/// PATH 环境无关紧要;命令退出即关标签。
+///
+/// wt 的 new-tab 解析会把 `-` 开头的参数当成自己的选项(pwsh 的 flag 拆开
+/// 传必挂 "arguments were not expected"),带引号的整串又会被它再引一层
+/// (变成 `""…""`,CreateProcess 拿到空程序名,0x80070057)。所以 PowerShell
+/// 路径用 **cmd /c 外兜**:外层 cmd 无破折号,wt 解析器放行;内层引号按
+/// CommandLineToArgvW 规则 \" 转义。
 #[cfg(windows)]
 pub fn open_terminal(cmd: &str) -> anyhow::Result<()> {
     let bin = "wt.exe";
     if !on_path(bin) {
         anyhow::bail!("Windows Terminal (wt.exe) not found on PATH");
     }
-    let (shell, flags) = windows_shell();
     let full = resolve_on_path(cmd)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| cmd.to_string());
 
-    // wt 对 new-tab 的参数解析会把 `-` 开头的东西当成自己的选项,把 shell
-    // 参数拆开传必挂("arguments were not expected: -NoLogo")。整条命令行
-    // 打包成**一个带引号的参数**交给 wt,它会把引号里的内容原样丢给
-    // CreateProcess;内嵌引号按 CommandLineToArgvW 规则用 \" 转义。
-    let mut commandline = shell;
-    for f in flags {
-        commandline.push(' ');
-        commandline.push_str(f);
+    // PowerShell 会话:cmd /c 链进 pwsh(PS7)→ powershell。
+    if parent_is_pwsh() {
+        let quoted = format!("\"cmd /c pwsh.exe -NoLogo -Command \\\"{full}\\\"\"");
+        return spawn_detached(bin, &["new-tab".into(), quoted]);
     }
-    commandline.push_str(&format!(" \\\"{full}\\\""));
-    let quoted = format!("\"{commandline}\"");
-    spawn_detached(bin, &["new-tab".into(), quoted])
+    // 非 PS(cmd 或未知):cmd /C 直接跑,wt 解析器对 /C 开头无感。
+    spawn_detached(
+        bin,
+        &[
+            "new-tab".into(),
+            "cmd".into(),
+            "/C".into(),
+            format!("\"{full}\""),
+        ],
+    )
 }
 
-/// 当前会话的 shell 与其 flag。PowerShell 会话必设 `PSMODULEPATH`,
-/// 这种情况下优先 pwsh(PS7)→ powershell;否则用 `ComSpec`(默认 cmd)。
+/// 父进程是不是 PowerShell?env 启发式(PSMODULEPATH)不可靠——cmd 下也会
+/// 从环境继承到它。直接查控制台进程列表里本进程的父进程映像名。
 #[cfg(windows)]
-fn windows_shell() -> (String, Vec<&'static str>) {
-    if std::env::var_os("PSMODULEPATH").is_some() {
-        for bin in ["pwsh.exe", "powershell.exe"] {
-            if on_path(bin) {
-                return (bin.to_string(), vec!["-NoLogo", "-Command"]);
-            }
-        }
+fn parent_is_pwsh() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    let mut ids = [0u32; 32];
+    let n = unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 32) } as usize;
+    if n < 2 {
+        return false;
     }
-    (
-        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
-        vec!["/C"],
-    )
+    // 列表大致按「先来的在前」:父 shell 在我们前面,取倒数第一个非自身。
+    let me = std::process::id();
+    let Some(&pid) = ids[..n].iter().rev().find(|&&p| p != me) else {
+        return false;
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return false;
+    }
+    let name = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+    name.ends_with("\\pwsh.exe") || name.ends_with("\\powershell.exe")
 }
 
 /// 在当前进程的 PATH 里解析命令的绝对路径(含不带/带 `.exe` 两种形态);
