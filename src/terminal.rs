@@ -235,13 +235,18 @@ fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String
             ))
         }
         Terminal::ITerm => {
+            // iTerm 的 command 参数直接 execvp:不搜 PATH、也不经过 shell,
+            // 裸命令名(如 vibetty)必挂 "execvp failed"。给绝对路径的登录+
+            // 交互 shell,让它读 rc 找回 PATH。注意 iTerm 对这个串只做空白
+            // 切分、不解析引号,所以 cmd 里不能带空格(调用方都是单词命令)。
+            let shell = user_shell();
             let esc = cmd.replace('\\', "\\\\").replace('"', "\\\"");
             Some((
                 "osascript".into(),
                 vec![
                     "-e".into(),
                     format!(
-                        "tell application \"iTerm\" to create window with default profile command \"{esc}\""
+                        "tell application \"iTerm\" to create window with default profile command \"{shell} -l -i -c {esc}\""
                     ),
                 ],
             ))
@@ -310,6 +315,18 @@ mod tests {
     fn apple_escapes_quotes() {
         let (_, args) = launch_for(Terminal::AppleTerminal, "echo \"hi\"", "/bin/zsh").unwrap();
         assert!(args[1].contains("do script \"echo \\\"hi\\\"\""));
+    }
+
+    #[test]
+    fn iterm_wraps_absolute_login_shell() {
+        // iTerm 的 command 走 execvp:不搜 PATH、不经 shell,所以必须给绝对
+        // 路径的登录+交互 shell 包住裸命令名。
+        let (_, args) = launch_for(Terminal::ITerm, "vibetty", "/bin/zsh").unwrap();
+        assert!(
+            args[1].contains(
+                "create window with default profile command \"/bin/zsh -l -i -c vibetty\""
+            )
+        );
     }
 
     #[test]
