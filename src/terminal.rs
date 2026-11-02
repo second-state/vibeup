@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(args, vec!["/usr/bin/fish", "-l", "-i", "-c", "echo hi"]);
 
         // 未知 shell 退回 sh -c。
-        let (bin, args) = launch_for(Terminal::Foot, "echo hi", "/bin/tcsh").unwrap();
+        let (_, args) = launch_for(Terminal::Foot, "echo hi", "/bin/tcsh").unwrap();
         assert_eq!(args, vec!["sh", "-c", "echo hi"]);
     }
 

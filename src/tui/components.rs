@@ -997,15 +997,34 @@ pub struct SharePageProps {
 }
 
 /// 截断到 n 个字符(超长加 …)。
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        format!(
-            "{}…",
-            s.chars().take(n.saturating_sub(1)).collect::<String>()
-        )
+/// 字符串的显示宽度(CJK 算 2 列)。
+fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    s.width()
+}
+
+/// 截断/补齐到指定显示宽度:超长按显示宽截断并加 …,不足补空格。
+/// 与 `{:<n$}` 不同,这里对 CJK 也是对齐的(按显示宽,不是字符数)。
+fn fit(s: &str, w: usize) -> String {
+    let width = display_width(s);
+    if width <= w {
+        return format!("{}{}", s, " ".repeat(w - width));
     }
+    if w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthStr::width(ch.to_string().as_str());
+        if used + cw > w.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// agent 状态的展示色。
@@ -1067,11 +1086,24 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
             Style::new().dark_gray(),
         ))]
     } else {
+        // 按终端宽度分列:session/agent/state/share 固定,title 吃剩余宽度的
+        // 大头。行与表头都用 fit()(显示宽截断/补齐),CJK 长标题不会顶歪后列。
+        let term_w = ratatui_kit::crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(120);
+        let w_session = 9usize;
+        let w_agent = 7usize;
+        let w_state = 9usize;
+        let w_share = 8usize;
+        let w_title = term_w
+            .saturating_sub(4)
+            .saturating_sub(w_session + w_agent + w_state + w_share + 3)
+            .max(16);
         let mut lines = vec![Line::from(vec![
-            Span::styled(format!("{:<30}", "title"), Style::new().bold()),
-            Span::styled(format!("{:<10}", "session"), Style::new().bold()),
-            Span::styled(format!("{:<8}", "agent"), Style::new().bold()),
-            Span::styled(format!("{:<10}", "state"), Style::new().bold()),
+            Span::styled(fit("title", w_title), Style::new().bold()),
+            Span::styled(fit("session", w_session), Style::new().bold()),
+            Span::styled(fit("agent", w_agent), Style::new().bold()),
+            Span::styled(fit("state", w_state), Style::new().bold()),
             Span::styled("share", Style::new().bold()),
         ])];
         for (i, r) in st.rows.iter().enumerate() {
@@ -1085,10 +1117,10 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
                 None => Span::styled("-", Style::new().dark_gray()),
             };
             let line = Line::from(vec![
-                Span::raw(format!("{:<30}", clip(&r.title, 29))),
-                Span::raw(format!("{:<10}", clip(&r.session, 9))),
-                Span::raw(format!("{:<8}", r.agent)),
-                Span::styled(format!("{:<10}", r.state.clone()), state_style(&r.state)),
+                Span::raw(fit(&r.title, w_title)),
+                Span::raw(fit(&r.session, w_session)),
+                Span::raw(fit(&r.agent, w_agent)),
+                Span::styled(fit(&r.state, w_state), state_style(&r.state)),
                 share_span,
             ]);
             lines.push(if i == st.sel {
