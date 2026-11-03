@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/second-state/vibeup/main/install.sh
 
 或从[最新 release](https://github.com/second-state/vibeup/releases/latest)下载对应平台的二进制 —— `vibeup-linux-x64`、`vibeup-linux-arm64`、`vibeup-macos-arm64`、`vibeup-windows-x64.exe`(各带一个 `.sha256sum` 校验文件)—— 放进 `PATH` 即可。已装过的直接 `vibeup update self` 自更新。
 
+> **Windows 用户注意:** install.sh 暂不支持 Windows——请把 `vibeup-windows-x64.exe` 下载到 `%USERPROFILE%\.cargo\bin`。如果没装过 Rust,这个目录默认不在 `PATH` 里:需要手动把 `%USERPROFILE%\.cargo\bin` 加进用户 `PATH`(设置 → 系统 → 关于 → 高级系统设置 → 环境变量,或执行 `setx PATH "%PATH%;%USERPROFILE%\.cargo\bin"`),然后重开终端。
+
 ## 使用
 
 不带子命令直接运行 `vibeup`(或 `vibeup status`),查看已装版本 vs 最新版本:

@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/second-state/vibeup/main/install.sh
 
 or grab a prebuilt binary from the [latest release](https://github.com/second-state/vibeup/releases/latest) — `vibeup-linux-x64`, `vibeup-linux-arm64`, `vibeup-macos-arm64`, `vibeup-windows-x64.exe` (each has a companion `.sha256sum`) — and put it on your `PATH`. Already installed? `vibeup update self` upgrades vibeup itself.
 
+> **Windows note:** install.sh doesn't cover Windows yet — download `vibeup-windows-x64.exe` into `%USERPROFILE%\.cargo\bin`. If you don't have Rust installed, that directory is not on your `PATH` by default: add `%USERPROFILE%\.cargo\bin` to your user `PATH` (Settings → System → About → Advanced system settings → Environment Variables, or `setx PATH "%PATH%;%USERPROFILE%\.cargo\bin"`), then reopen the terminal.
+
 ## Usage
 
 Run `vibeup` with no subcommand (or `vibeup status`) to see what's installed vs. the latest release:
