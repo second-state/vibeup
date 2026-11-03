@@ -66,8 +66,8 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
     let share = hooks.use_state(super::state::ShareState::default);
-    let mut message =
-        hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions · Esc quit".to_string());
+    let mut message = hooks
+        .use_state(|| "Tab tabs · ↑↓ select · Enter actions · w wizard · Esc quit".to_string());
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
