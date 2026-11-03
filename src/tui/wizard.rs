@@ -131,6 +131,8 @@ pub struct WizardState {
     /// plugin 询问已问过(不管答了什么)。
     pub plugin_claude_asked: bool,
     pub plugin_codex_asked: bool,
+    /// 连上设备后读到的 CONFIG 快照(表单预填现有值用)。
+    pub config: Option<serde_json::Value>,
 }
 
 impl WizardState {
@@ -168,6 +170,7 @@ impl WizardState {
             history: Vec::new(),
             plugin_claude_asked: false,
             plugin_codex_asked: false,
+            config: None,
         }
     }
 }
@@ -379,16 +382,19 @@ fn cli_on_path(cli: &str) -> bool {
 
 /// 读设备当前 wifi_list(真机走会话;demo/mock 直接读)。
 fn read_wifi_list(rt: &WizardRuntime) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(ble::parse_wifi_list(&read_device_config(rt)?.to_string()))
+}
+
+/// 读设备 CONFIG 快照(真机走会话;demo/mock 直接读 mock)。
+fn read_device_config(rt: &WizardRuntime) -> anyhow::Result<serde_json::Value> {
     match rt.session.as_ref() {
-        Some(s) => {
-            let cfg = s.read_config()?;
-            Ok(ble::parse_wifi_list(&serde_json::to_string(&cfg)?))
-        }
+        Some(s) => s.read_config(),
         None => {
             if rt.mock.is_null() {
                 anyhow::bail!("device not connected");
             }
-            Ok(ble::parse_wifi_list(&rt.mock.to_string()))
+            serde_json::from_str(&rt.mock.to_string())
+                .map_err(|e| anyhow::anyhow!("invalid mock config: {e}"))
         }
     }
 }
@@ -811,27 +817,55 @@ fn prep_form(st: &mut WizardState) {
     st.input2 = Input::default();
     st.input3 = Input::default();
     st.field_idx = 0;
+
+    // 已连上设备:把 CONFIG 里的现有值预填进表单,方便只改一部分。
+    let Some(cfg) = &st.config else {
+        return;
+    };
+    match st.step {
+        Step::AsrApi => {
+            st.input = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "uri"]));
+            st.input2 = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "api_key"]));
+            st.input3 = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "model"]));
+        }
+        Step::BrokerInput => {
+            st.input = Input::with_str(&super::state::cfg_get(cfg, &["server_url"]));
+        }
+        Step::WifiForm => {
+            // 第一条现有 WiFi 作预填(提交 = 同 ssid 覆盖,不新增)。
+            if let Some(e) = cfg
+                .get("wifi_list")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+            {
+                st.input = Input::with_str(&super::state::cfg_get(e, &["ssid"]));
+                st.input2 = Input::with_str(&super::state::cfg_get(e, &["pass"]));
+            }
+        }
+        _ => {}
+    }
 }
 
-/// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤自动重置输入。
+/// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤重置输入并预填现有值。
 fn goto(st: &mut WizardState, step: Step) {
     st.history.push(st.step.clone());
     st.choice = 0;
     st.err = None;
-    if matches!(
+    let is_form = matches!(
         step,
         Step::HotkeyCapture
             | Step::AsrApi
             | Step::WifiForm
             | Step::TailscaleKey
             | Step::BrokerInput
-    ) {
+    );
+    st.step = step;
+    if is_form {
         prep_form(st);
     }
-    st.step = step;
 }
 
-/// 返回上一步(历史栈弹出)。目标步骤的进入效果:Scan 重扫,表单重置。
+/// 返回上一步(历史栈弹出)。目标步骤的进入效果:Scan 重扫,表单重置并预填。
 fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
     let Some(prev) = st.history.pop() else {
         return;
@@ -850,9 +884,11 @@ fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
                 | Step::TailscaleKey
                 | Step::BrokerInput
         ) {
+            st.step = prev;
             prep_form(st);
+        } else {
+            st.step = prev;
         }
-        st.step = prev;
     }
 }
 
@@ -1473,7 +1509,11 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                 st.connecting = None;
                 rt.pending_name = None;
                 match res {
-                    Ok(_) => after_connect(st),
+                    Ok(_) => {
+                        // 连上先读一遍设备 CONFIG,后续表单预填现有值。
+                        st.config = read_device_config(rt).ok();
+                        after_connect(st);
+                    }
                     Err(e) => {
                         rt.session = None;
                         st.err = Some(format!("connect failed: {e:#} — Enter to scan again"));
@@ -1515,6 +1555,8 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
             Some(WizOut::Connected(Ok(cfg))) => {
                 st.connecting = None;
                 rt.mock = cfg; // demo:后续写入落这份假配置
+                // 读一份快照进状态,后续表单预填现有值(真机路径同款)。
+                st.config = read_device_config(rt).ok();
                 after_connect(st);
             }
             Some(WizOut::Connected(Err(e))) => {
@@ -1777,7 +1819,26 @@ fn step_screen(st: &WizardState) -> Screen {
         }
         Step::WifiForm => {
             s.title = "wizard — wifi".into();
-            s.text = vec![text_line("Add a WiFi network (existing list is kept):")];
+            let existing = st
+                .config
+                .as_ref()
+                .and_then(|c| c.get("wifi_list"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            s.text = if existing.is_empty() {
+                vec![text_line("Add a WiFi network (existing list is kept):")]
+            } else {
+                vec![
+                    text_line("Add a WiFi network (existing list is kept):"),
+                    dim_text(&format!("on device: {existing}")),
+                ]
+            };
             s.body = vec![
                 field_line("ssid", &st.input, st.field_idx == 0),
                 field_line("password", &st.input2, st.field_idx == 1),
