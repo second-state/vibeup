@@ -72,6 +72,8 @@ pub enum Step {
     IpPick,
     /// 17:配置完成确认页(✓ 总结,Enter 继续/结束)
     Done,
+    /// 17b:结束语 popup(按是否 remote 给文案,Ok 关闭向导)
+    Farewell,
 }
 
 /// 后台任务种类(决定任务完成后的去向)。
@@ -135,6 +137,8 @@ pub struct WizardState {
     pub plugin_codex_asked: bool,
     /// 连上设备后读到的 CONFIG 快照(表单预填现有值用)。
     pub config: Option<serde_json::Value>,
+    /// 配置了 remote 模式(outside LAN + broker 落地):决定收尾欢迎语。
+    pub remote_done: bool,
 }
 
 impl WizardState {
@@ -173,6 +177,7 @@ impl WizardState {
             plugin_claude_asked: false,
             plugin_codex_asked: false,
             config: None,
+            remote_done: false,
         }
     }
 }
@@ -821,6 +826,16 @@ fn apply_broker(
 }
 
 /// 进任何表单步骤前复位输入状态(防 field_idx/旧文本残留)。
+/// 结束语文案:按是否配置了 remote 模式给不同内容。
+fn farewell_text(st: &WizardState) -> String {
+    if st.remote_done {
+        "The keyboard and remote mode are set up. Use remote to quick-start a session. Enjoy vibe coding!"
+    } else {
+        "Keyboard mode is all set — the session colors tell you the agent status. Enjoy your vibe coding!"
+    }
+    .to_string()
+}
+
 fn prep_form(st: &mut WizardState) {
     st.input = Input::default();
     st.input2 = Input::default();
@@ -1272,6 +1287,8 @@ pub fn wizard_key(
                 if st.choice == 2 {
                     back_one(st, rt);
                 } else if st.choice == 0 {
+                    // remote 模式(outside LAN):收尾欢迎语用 remote 版文案。
+                    st.remote_done = true;
                     goto(st, Step::HasTailscale);
                 } else {
                     // 14a:局域网模式。多个候选地址就列出来让用户选
@@ -1286,7 +1303,7 @@ pub fn wizard_key(
                             apply_broker(
                                 st,
                                 rt,
-                                format!("{}:1883", ips[0]),
+                                format!("mqtt://{}:1883", ips[0]),
                                 "mqtt://127.0.0.1:1883",
                             );
                         }
@@ -1468,6 +1485,12 @@ pub fn wizard_key(
 
         // 17:完成确认页。Enter 结束。
         Step::Done => {
+            if enter {
+                goto(st, Step::Farewell);
+            }
+        }
+        // 结束语 popup:Enter 关闭向导。
+        Step::Farewell => {
             if enter {
                 return Outcome::exit();
             }
@@ -2058,7 +2081,20 @@ fn step_screen(st: &WizardState) -> Screen {
                     .collect();
             }
             s.body = choices(st, &["Continue"]);
-            s.hint = vec![hint_line("Enter finish")];
+            s.hint = vec![hint_line("Enter continue")];
+        }
+        Step::Farewell => {
+            s.title = "wizard — all set".into();
+            // 按固定宽度折行:不折的话长句在弹窗里会被截断。
+            s.text = vec![Line::from("")];
+            for l in wrap_words(&farewell_text(st), 42) {
+                s.text.push(Line::from(Span::styled(
+                    l,
+                    Style::new().green().add_modifier(Modifier::BOLD),
+                )));
+            }
+            s.body = choices(st, &["Ok"]);
+            s.hint = vec![hint_line("Enter close")];
         }
     }
     s
