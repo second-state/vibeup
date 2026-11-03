@@ -136,7 +136,34 @@ pub enum WifiAction {
     Set { json: String },
 }
 
+/// broker 地址归一化:trim;没有 scheme 时自动补 `mqtt://`;scheme 不是
+/// mqtt/mqtts/ws/wss 或 host 为空则报错。固件 `parse_broker_uri` 强制要求
+/// 带 scheme,裸 `host:port` 写进 NVS 会让设备连不上。
+pub fn normalize_broker_url(url: &str) -> Result<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("broker address is empty");
+    }
+    let url = if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("mqtt://{url}")
+    };
+    let Some((scheme, rest)) = url.split_once("://") else {
+        bail!("unreachable");
+    };
+    if !matches!(scheme, "mqtt" | "mqtts" | "ws" | "wss") {
+        bail!("unsupported scheme `{scheme}://` — use mqtt:// mqtts:// ws:// or wss://");
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or("");
+    if authority.rsplit('@').next().unwrap_or("").is_empty() {
+        bail!("broker address has an empty host");
+    }
+    Ok(url)
+}
+
 pub fn server_url(target: Target, url: String, reset: bool, dry: bool) -> Result<()> {
+    let url = normalize_broker_url(&url)?;
     if dry {
         println!("would write server_url = {url}{}", reboot_note(reset));
         return Ok(());

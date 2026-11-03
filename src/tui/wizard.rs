@@ -5,6 +5,8 @@
 //! `ble::Session`(demo 无会话,落 mock);安装复用 `install::install`
 //! + 共享进度;demo 模式全程造假不碰真机。
 
+use anyhow::Context;
+
 use super::actions::scan_devices_thread;
 use super::demo;
 use super::state::{DownloadProgress, Input, SharedProgress, wrap_words};
@@ -448,6 +450,13 @@ fn wiz_write_field(
     field: &str,
     value: serde_json::Value,
 ) -> anyhow::Result<()> {
+    // server_url 统一归一化(裸 host:port 自动补 mqtt://)。
+    let value = if field == "server_url" {
+        let url = value.as_str().context("server_url must be a string")?;
+        serde_json::Value::String(crate::config_cmd::normalize_broker_url(url)?)
+    } else {
+        value
+    };
     let Some(session) = rt.session.as_ref() else {
         if rt.mock.is_null() {
             anyhow::bail!("device not connected");
@@ -1346,7 +1355,12 @@ pub fn wizard_key(
                     st.ts_ip = tailscale_ip();
                     match st.ts_ip.clone() {
                         Some(ip) => {
-                            apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                            apply_broker(
+                                st,
+                                rt,
+                                format!("mqtt://{ip}:1883"),
+                                "mqtt://127.0.0.1:1883",
+                            );
                         }
                         None => st.step = Step::TailscaleIp,
                     }
@@ -1365,7 +1379,12 @@ pub fn wizard_key(
                         st.ts_ip = tailscale_ip();
                         match st.ts_ip.clone() {
                             Some(ip) => {
-                                apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                                apply_broker(
+                                    st,
+                                    rt,
+                                    format!("mqtt://{ip}:1883"),
+                                    "mqtt://127.0.0.1:1883",
+                                );
                             }
                             None => st.step = Step::TailscaleIp,
                         }
@@ -1381,7 +1400,7 @@ pub fn wizard_key(
             KeyCode::Enter | KeyCode::Char('r') => {
                 st.ts_ip = tailscale_ip();
                 if let Some(ip) = st.ts_ip.clone() {
-                    apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                    apply_broker(st, rt, format!("mqtt://{ip}:1883"), "mqtt://127.0.0.1:1883");
                 }
             }
             KeyCode::Char('e') => {

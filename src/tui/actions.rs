@@ -807,11 +807,13 @@ pub fn do_field(
     };
     match field {
         Field::ServerUrl => {
+            // 归一化:裸 host:port 自动补 mqtt://(固件要求带 scheme)。
+            let url = config_cmd::normalize_broker_url(val)?;
             if demo {
-                rt.mock["server_url"] = val.into();
+                rt.mock["server_url"] = url.into();
                 return Ok(());
             }
-            write(rt, "server_url", val.into())
+            write(rt, "server_url", url.into())
         }
         Field::AsrUri => {
             if demo {
