@@ -48,6 +48,9 @@ Binding forms:
   name      one of the key names below, e.g. delete, esc, f5
   Mod+Key   key combo, e.g. Ctrl+C, Alt+Delete, Ctrl+Shift+T
             modifiers: ctrl alt shift option win cmd gui meta
+            right-side: rctrl rshift ralt roption rgui rwin rmeta rsupper
+            (RAlt alone = right Alt key; RAlt+F5 needs firmware >= the
+            r-modifier match support — the key name itself works now)
 
 Key names (case-insensitive):
   enter, return              Enter

@@ -376,6 +376,19 @@ pub(crate) fn parse_key_binding(input: &str) -> serde_json::Value {
         "meta",
         "cmd",
         "command",
+        // 右侧修饰键:固件 key_name_to_hid_code 认 RCTRL/RSHIFT/RALT/RGUI
+        // (映射到 0xE4-0xE7)。作为独立键名固件已可用;作为 combo 修饰符
+        // 固件 BLE 分支(main.rs 的 modifiers match)还没认,待固件补上。
+        "rctrl",
+        "rcontrol",
+        "rshift",
+        "ralt",
+        "roption",
+        "rgui",
+        "rwin",
+        "rmeta",
+        "rsuper",
+        "rcommand",
         "f1",
         "f2",
         "f3",
@@ -401,7 +414,25 @@ pub(crate) fn parse_key_binding(input: &str) -> serde_json::Value {
         "bracketleft",
         "bracketright",
     ];
-    const VALID_MODIFIERS: &[&str] = &["ctrl", "alt", "option", "shift", "meta", "win", "cmd"];
+    const VALID_MODIFIERS: &[&str] = &[
+        "ctrl",
+        "alt",
+        "option",
+        "shift",
+        "meta",
+        "win",
+        "cmd",
+        // 右侧变体(别名归一成固件键名表的写法)。
+        "rctrl",
+        "rshift",
+        "ralt",
+        "roption",
+        "rgui",
+        "rwin",
+        "rmeta",
+        "rsuper",
+        "rcommand",
+    ];
 
     // 单个大写字母 / 数字 = 单键 combo。
     if trimmed.len() == 1 {
@@ -443,6 +474,9 @@ pub(crate) fn parse_key_binding(input: &str) -> serde_json::Value {
                     .map(|p| match p.to_lowercase().as_str() {
                         "win" | "cmd" => "meta".to_string(),
                         "option" => "alt".to_string(),
+                        // 右侧别名归一到固件键名表的写法(大写后即 RGUI/RALT)。
+                        "rwin" | "rcommand" => "rgui".to_string(),
+                        "roption" => "ralt".to_string(),
                         other => other.to_string(),
                     })
                     .collect();
@@ -524,6 +558,34 @@ mod tests {
         let v = parse_key_binding("enter");
         assert_eq!(v["type"], "combo");
         assert_eq!(v["key"], "ENTER");
+    }
+
+    #[test]
+    fn right_modifier_key_names() {
+        // 独立键名:大小写都收,输出大写给固件键名表(0xE4-0xE7)。
+        for s in ["ralt", "RAlt", "RALT", "rctrl", "rshift", "RGui"] {
+            let v = parse_key_binding(s);
+            assert_eq!(v["type"], "combo", "input {s}");
+            assert_eq!(v["key"], s.to_uppercase(), "input {s}");
+            assert_eq!(v["modifiers"], serde_json::json!([]), "input {s}");
+        }
+    }
+
+    #[test]
+    fn right_modifier_combo_normalizes_aliases() {
+        let v = parse_key_binding("RAlt+F5");
+        assert_eq!(v["type"], "combo");
+        assert_eq!(v["key"], "F5");
+        assert_eq!(v["modifiers"], serde_json::json!(["ralt"]));
+
+        let v = parse_key_binding("RWin+T");
+        assert_eq!(v["modifiers"], serde_json::json!(["rgui"]));
+
+        let v = parse_key_binding("ROption+X");
+        assert_eq!(v["modifiers"], serde_json::json!(["ralt"]));
+
+        let v = parse_key_binding("RCtrl+Shift+T");
+        assert_eq!(v["modifiers"], serde_json::json!(["rctrl", "shift"]));
     }
 
     #[test]

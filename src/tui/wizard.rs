@@ -1906,7 +1906,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Type your IME hotkey, or press a key combo."),
                 dim_text("modifiers: ctrl · shift · alt · meta/win/super"),
                 dim_text("special: delete esc tab space enter f1-f12 home end"),
-                dim_text("combos: ctrl+x alt+f5 · \"text\" = text macro"),
+                dim_text("combos: ctrl+x alt+f5 ralt+rshift · \"text\" = text macro"),
                 dim_text("tui limits: bare ctrl/alt can't be captured — type them"),
             ];
             s.body = vec![field_line("hotkey", &st.input, true)];
