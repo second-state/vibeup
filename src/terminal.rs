@@ -320,7 +320,6 @@ fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String
             // 裸命令名(如 vibetty)必挂 "execvp failed"。给绝对路径的登录+
             // 交互 shell,让它读 rc 找回 PATH。注意 iTerm 对这个串只做空白
             // 切分、不解析引号,所以 cmd 里不能带空格(调用方都是单词命令)。
-            let shell = user_shell();
             let esc = cmd.replace('\\', "\\\\").replace('"', "\\\"");
             Some((
                 "osascript".into(),
