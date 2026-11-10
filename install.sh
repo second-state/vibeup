@@ -255,8 +255,9 @@ else
 fi
 
 # vibetty 装好且机器上有 herdr → 注册 vibetty plugin(会 clone + 构建,耗时几分钟)。
+# curl | bash 时 stdin 是管道(非交互),herdr 必须带 --yes 才肯装。
 if [ -x "$INSTALL_DIR/vibetty" ] && command -v herdr >/dev/null 2>&1; then
   echo "herdr detected — installing the vibetty plugin (clones and builds, takes a few minutes)…"
-  herdr plugin install second-state/vibetty ||
+  herdr plugin install --yes second-state/vibetty ||
     echo "warning: herdr plugin install failed — run 'herdr plugin install second-state/vibetty' later" >&2
 fi
