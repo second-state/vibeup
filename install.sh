@@ -9,6 +9,8 @@
 # Set VIBEUP_FALLBACK_BUILD=1 to build from the local checkout with
 # `cargo install --path .` when the download fails (used by local dev; off by
 # default for end users).
+# Set VIBEUP_NO_EXTRAS=1 to skip the post-install extras (vibekeys/vibetty
+# install + agent/herdr plugin setup).
 set -euo pipefail
 
 REPO="second-state/vibeup"
@@ -179,3 +181,82 @@ case ":$PATH:" in
     esac
     ;;
 esac
+
+# --- post-install extras: install the rest of the vibe family with the binary
+# --- we just put in place. vibekeys/vibetty install automatically; their
+# --- companion plugins (Claude Code / Codex agent plugins) ask first.
+# --- VIBEUP_NO_EXTRAS=1 skips this whole block.
+if [ "${VIBEUP_NO_EXTRAS:-0}" = "1" ]; then
+  echo "VIBEUP_NO_EXTRAS=1 — skipping vibekeys/vibetty install"
+  exit 0
+fi
+
+VIBEUP_BIN="$INSTALL_DIR/vibeup"
+
+# 问一次 yes/no。curl | bash 时 stdin 是脚本本身,改问 /dev/tty;
+# 完全非交互(没有 tty)时直接返回 No。
+ask_yn() {
+  local ans=""
+  if [ -t 0 ]; then
+    read -r -p "$1" ans
+  elif [ -t 1 ] && [ -r /dev/tty ]; then
+    printf '%s' "$1" > /dev/tty
+    read -r ans < /dev/tty
+  else
+    return 1
+  fi
+  case "$ans" in
+    [yY]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_pkg() {
+  echo "Installing $1…"
+  # --dir 与本脚本的 INSTALL_DIR 对齐,别让 vibeup 默认装去 ~/.cargo/bin。
+  "$VIBEUP_BIN" install --dir "$INSTALL_DIR" "$1" ||
+    echo "warning: $1 install failed — run '$VIBEUP_BIN install $1' later" >&2
+}
+
+# --- vibekeys ---
+if [ -x "$INSTALL_DIR/vibekeys" ]; then
+  echo "vibekeys is already installed — skip"
+else
+  install_pkg vibekeys
+
+  # agent plugins:检测到哪个 CLI 就问一次,统一装/不装。
+  CLIS=()
+  command -v claude >/dev/null 2>&1 && CLIS+=(claude)
+  command -v codex >/dev/null 2>&1 && CLIS+=(codex)
+  if [ ${#CLIS[@]} -eq 0 ]; then
+    echo "claude / codex not found — agent plugins skipped (install them later via the vibeup wizard)"
+  elif ask_yn "Install the vibekeys agent plugin(s) for ${CLIS[*]}? [y/N] "; then
+    for cli in "${CLIS[@]}"; do
+      echo "Adding marketplace for $cli…"
+      "$cli" plugin marketplace add second-state/marketplace ||
+        echo "warning: marketplace add failed for $cli" >&2
+    done
+    for cli in "${CLIS[@]}"; do
+      if [ "$cli" = "codex" ]; then action="add"; else action="install"; fi
+      echo "Installing vibekeys plugin for $cli…"
+      "$cli" plugin "$action" vibekeys@second-state-tools ||
+        echo "warning: vibekeys plugin install failed for $cli — run '$cli' later or rerun the vibeup wizard" >&2
+    done
+  else
+    echo "skipped agent plugins — rerun 'vibeup wizard' to install them later"
+  fi
+fi
+
+# --- vibetty ---
+if [ -x "$INSTALL_DIR/vibetty" ]; then
+  echo "vibetty is already installed — skip"
+else
+  install_pkg vibetty
+fi
+
+# vibetty 装好且机器上有 herdr → 注册 vibetty plugin(会 clone + 构建,耗时几分钟)。
+if [ -x "$INSTALL_DIR/vibetty" ] && command -v herdr >/dev/null 2>&1; then
+  echo "herdr detected — installing the vibetty plugin (clones and builds, takes a few minutes)…"
+  herdr plugin install second-state/vibetty ||
+    echo "warning: herdr plugin install failed — run 'herdr plugin install second-state/vibetty' later" >&2
+fi

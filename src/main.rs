@@ -111,7 +111,9 @@ enum Cmd {
         #[arg(long)]
         pre: bool,
     },
-    /// Uninstall a package (removes entry point and all versioned files)
+    /// Uninstall a package (removes entry point and all versioned files);
+    /// "self" = vibeup itself, "all" = vibekeys + vibetty + vibeup (plus the
+    /// vibekeys agent plugins and the vibetty herdr plugin)
     Uninstall { name: String },
     /// Configure devices over BLE (VibeKeys keyboard / VibeWatch)
     Config {
@@ -226,12 +228,13 @@ fn main() -> Result<()> {
         }
         Cmd::Update { name, pre } => update(name.as_deref(), pre, &cli.dir, cli.dry_run),
         Cmd::Uninstall { name } => {
-            let p = if name == "self" {
-                &pkg::SELF
+            let dir = pkg::install_dir(cli.dir.as_deref());
+            let log = if name == "all" {
+                install::uninstall_all(&dir, cli.dry_run)?
             } else {
-                pkg::find(&name)?
+                let p = if name == "self" { &pkg::SELF } else { pkg::find(&name)? };
+                install::uninstall(p, &dir, cli.dry_run)?
             };
-            let log = install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()), cli.dry_run)?;
             print!("{log}");
             Ok(())
         }

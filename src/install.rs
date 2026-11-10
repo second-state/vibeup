@@ -307,5 +307,99 @@ pub fn uninstall(pkg: &Pkg, dir: &Path, dry_run: bool) -> Result<String> {
             dir.display()
         ));
     }
+    // 卸载 vibetty 时顺手卸掉 herdr plugin(best-effort),不然 plugin 的
+    // hook 还指着刚删掉的二进制。
+    if pkg.name == "vibetty" {
+        out.push_str(&uninstall_herdr_plugin(dry_run));
+    }
+    // 卸载 vibekeys 时顺手卸掉 Claude Code / Codex 的 vibekeys plugin。
+    if pkg.name == "vibekeys" {
+        out.push_str(&uninstall_agent_plugins(dry_run));
+    }
     Ok(out)
+}
+
+/// `vibeup uninstall all`:三个包全卸。self(vibeup)放最后——它就是正在运行
+/// 的进程,删文件不影响自身继续执行;附带清理(vibetty 的 herdr plugin、
+/// vibekeys 的 agent plugin)随各自包的卸载一起触发。
+pub fn uninstall_all(dir: &Path, dry_run: bool) -> Result<String> {
+    let mut out = String::new();
+    for name in ["vibekeys", "vibetty"] {
+        let p = pkg::find(name).context(format!("unknown package `{name}`"))?;
+        out.push_str(&uninstall(p, dir, dry_run)?);
+    }
+    out.push_str(&uninstall(&pkg::SELF, dir, dry_run)?);
+    Ok(out)
+}
+
+/// vibekeys 的卸载后清理:移除 Claude Code / Codex 的 vibekeys plugin
+/// (cli_uninstall 里的 best-effort,失败不影响卸载结果)。
+fn uninstall_agent_plugins(dry_run: bool) -> String {
+    if dry_run {
+        return "Would remove agent plugins: claude vibekeys, codex vibekeys\n".into();
+    }
+    let mut out = String::new();
+    out.push_str(&cli_uninstall(
+        "claude",
+        &["plugin", "uninstall", "vibekeys@second-state-tools"],
+    ));
+    out.push_str(&cli_uninstall(
+        "codex",
+        &["plugin", "remove", "vibekeys@second-state-tools"],
+    ));
+    out
+}
+
+/// 跑一条 `cli …` 卸载命令并总结成一行。CLI 不在 PATH / plugin 本来没装
+/// 都只记一行说明。注意 claude 的 plugin uninstall 失败也退出 0,得看输出。
+fn cli_uninstall(cli: &str, args: &[&str]) -> String {
+    let on_path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(cli).is_file()))
+        .unwrap_or(false);
+    if !on_path {
+        return format!("{cli} not on PATH — its vibekeys plugin left in place\n");
+    }
+    let label = args.last().copied().unwrap_or_default().to_string();
+    match std::process::Command::new(cli).args(args).output() {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let combined = format!("{stdout}{stderr}");
+            let lower = combined.to_lowercase();
+            if lower.contains("not found in installed plugins")
+                || lower.contains("not installed")
+            {
+                format!("{cli} plugin: {label} is not installed — nothing to remove\n")
+            } else if o.status.success() {
+                format!("Removed {cli} plugin: {label}\n")
+            } else {
+                format!("{cli} plugin uninstall failed: {}\n", combined.trim())
+            }
+        }
+        Err(e) => format!("{cli} plugin uninstall failed: {e}\n"),
+    }
+}
+
+/// vibetty 的卸载后清理:移除 herdr 里的 vibetty plugin。herdr 没装、
+/// plugin 本来就没有、命令失败都只记一行,不影响卸载结果。
+fn uninstall_herdr_plugin(dry_run: bool) -> String {
+    if dry_run {
+        return "Would remove herdr plugin: vibetty\n".into();
+    }
+    let out = std::process::Command::new("herdr")
+        .args(["plugin", "uninstall", "vibetty"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => "Removed herdr plugin: vibetty\n".into(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let err = stderr.as_str();
+            if err.contains("plugin not installed") {
+                "herdr plugin: vibetty is not installed — nothing to remove\n".into()
+            } else {
+                format!("herdr plugin uninstall failed: {err}\n")
+            }
+        }
+        Err(e) => format!("herdr not available, herdr plugin left in place: {e}\n"),
+    }
 }
