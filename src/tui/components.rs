@@ -150,10 +150,13 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                                 && server_url_empty
                             {
                                 st.auto_wizard_done = true;
-                                // BLE 会话移交给向导 runtime(设备页让出连接)。
+                                // BLE 会话/demo 假配置移交给向导 runtime
+                                // (设备页让出连接;demo 连接只填 mock 不开
+                                // session,所以两者都要带)。
                                 let wrt_arc = wiz_rt.read().clone();
                                 let mut wrt = wrt_arc.lock().unwrap();
                                 wrt.session = rt.session.take();
+                                wrt.mock = std::mem::take(&mut rt.mock);
                                 let mut wst = super::wizard::WizardState::new(demo, dry_run);
                                 wst.device = kind;
                                 // 带上设备配置快照:apply_broker 写完 server-url
@@ -267,6 +270,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                         rt_watch
                     };
                     rt.session = wrt.session.take();
+                    rt.mock = std::mem::take(&mut wrt.mock);
                     let _ = super::actions::load_config(demo, &mut st, rt);
                 }
                 return EventResult::Consumed;

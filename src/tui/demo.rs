@@ -92,12 +92,35 @@ pub(super) fn demo_scan_job(kind: DeviceKind) -> Job {
     })
 }
 
-/// demo 连接:假装连了 0.4s,回样例配置。
-pub(super) fn demo_connect_job(kind: DeviceKind) -> Job {
+/// demo 连接:假装连了 0.4s,回样例配置;`bare` = 扫描列表里的第二台
+/// (未配置设备:无 asr、server_url 为空),用来演示/模拟连接后自动进
+/// 向导补配置的触发。
+pub(super) fn demo_connect_job(kind: DeviceKind, bare: bool) -> Job {
     spawn_job(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        JobOut::Config(Ok(sample_config(kind)))
+        JobOut::Config(Ok(if bare {
+            bare_config(kind)
+        } else {
+            sample_config(kind)
+        }))
     })
+}
+
+/// 未配置设备的 bare 假配置:无 asr、server_url 置空。
+pub(super) fn bare_config(kind: DeviceKind) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "wifi_list": [
+            {"ssid": "Home", "pass": "horse-battery"},
+            {"ssid": "Office", "pass": "correct-horse"}
+        ],
+        "server_url": "",
+    });
+    if kind == DeviceKind::VibeKeys {
+        v["mic_model"] = serde_json::json!(0);
+        // false:补配会话若误写 prefer_builtin_asr,设备页会显示 on 而非 off。
+        v["prefer_builtin_asr"] = serde_json::json!(false);
+    }
+    v
 }
 
 #[cfg(test)]

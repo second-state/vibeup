@@ -525,14 +525,20 @@ fn kick_scan(st: &mut WizardState, rt: &mut WizardRuntime) {
 }
 
 /// demo 假连接(真机走 Session::open,Ready 事件驱动)。
+/// 扫描列表的第二台 = 未配置设备:回 bare 配置,连接后自动进向导补配置。
 fn demo_connect(st: &mut WizardState, rt: &mut WizardRuntime, name: String) {
     st.connecting = Some(name);
     st.busy = Some(format!("connecting to {}", st.device.name()));
     st.job_kind = Some(JobKind::DemoConnect);
     let kind = st.device;
+    let bare = st.pick_sel == 1;
     rt.job = Some(spawn_wiz(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        WizOut::Connected(Ok(demo::sample_config(kind)))
+        WizOut::Connected(Ok(if bare {
+            demo::bare_config(kind)
+        } else {
+            demo::sample_config(kind)
+        }))
     }));
 }
 
@@ -1221,13 +1227,22 @@ pub fn wizard_key(
                         "api_key": api_key,
                         "model": model,
                     });
-                    let res = wiz_write_field(st, rt, "asr_config", asr).and_then(|()| {
-                        wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(true))
-                    });
+                    // 补配会话(server-url 之后的那次)只补 asr_config,
+                    // prefer_builtin_asr 保持设备原值;完整向导的 whisper
+                    // 分支才置 on。
+                    let res = if st.auto_session {
+                        wiz_write_field(st, rt, "asr_config", asr)
+                    } else {
+                        wiz_write_field(st, rt, "asr_config", asr).and_then(|()| {
+                            wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(true))
+                        })
+                    };
                     match res {
                         Ok(()) => {
                             st.log_line(format!("asr_config = {url}"), true);
-                            st.log_line("prefer_builtin_asr = on", true);
+                            if !st.auto_session {
+                                st.log_line("prefer_builtin_asr = on", true);
+                            }
                             st.choice = 0;
                             goto(st, input_next(st));
                         }
@@ -1525,13 +1540,14 @@ pub fn wizard_key(
         // 17:完成确认页。Enter 结束。
         Step::Done => {
             if enter {
-                // 自动补配会话:broker 设置完发现 asr 还是空的 → 接一段
-                // 输入法设置,设完经 input_next 回这里(只补一次)。
+                // broker 设置完发现 asr 还是空的 → 直接进 whisper API 设置,
+                // 设完经 input_next 回这里(只补一次)。
                 if st.asr_pending {
                     st.asr_pending = false;
                     st.auto_session = true;
                     st.choice = 0;
-                    goto(st, Step::InputMethod);
+                    prep_form(st);
+                    goto(st, Step::AsrApi);
                     return Outcome::none();
                 }
                 goto(st, Step::Farewell);
@@ -2130,7 +2146,7 @@ fn step_screen(st: &WizardState) -> Screen {
             }
             s.body = choices(st, &["Continue"]);
             s.hint = vec![hint_line(if st.asr_pending {
-                "Enter continue — input setup is next"
+                "Enter continue — whisper setup is next"
             } else {
                 "Enter continue"
             })];

@@ -454,8 +454,11 @@ fn start_connect(state: &mut DeviceState, rt: &mut DeviceRuntime, demo: bool, de
     state.conn = Conn::Connecting(dev.name);
     let kind = state.kind;
     match demo {
-        // demo:假任务 0.4s 后回样例配置。
-        true => rt.job = Some(demo::demo_connect_job(kind)),
+        // demo:假任务 0.4s 后回配置;第二台 = 未配置设备(bare)。
+        true => {
+            let bare = state.pick.iter().position(|d| d.id == dev.id) == Some(1);
+            rt.job = Some(demo::demo_connect_job(kind, bare));
+        }
         // 真机:常驻会话,Ready/Disconnected 事件驱动。
         false => rt.session = Some(ble::Session::open(target)),
     }
@@ -512,6 +515,11 @@ fn on_connect_result(
 ) -> String {
     match res {
         Ok(cfg) => {
+            // demo:runtime 的假配置跟着连接走(否则移交/归还用的还是
+            // 挂载时的 sample,与设备页显示的配置脱节)。
+            if state.demo {
+                rt.mock = cfg.clone();
+            }
             state.config = Some(cfg);
             state.connected_name = Some(
                 state
