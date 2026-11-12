@@ -667,6 +667,8 @@ pub struct DeviceState {
     pub popup: Option<PopupState>,
     /// keymap 编辑弹窗(键位列表 + 行内编辑)。
     pub keymap_popup: Option<KeymapPopupState>,
+    /// 连接后自动进向导(remote 引导)只提示一次;断开/失败后重置。
+    pub auto_wizard_done: bool,
 }
 
 impl DeviceState {

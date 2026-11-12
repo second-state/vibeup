@@ -527,6 +527,7 @@ fn on_connect_result(
         Err(e) => {
             let msg = format!("{e:#}");
             state.conn = Conn::Failed(msg.clone());
+            state.auto_wizard_done = false;
             msg
         }
     }
@@ -543,6 +544,7 @@ fn on_session_event(state: &mut DeviceState, rt: &mut DeviceRuntime, ev: Session
         SessionEvent::Ready(res) => on_connect_result(state, rt, res),
         SessionEvent::Disconnected(e) => {
             drop(rt.session.take());
+            state.auto_wizard_done = false;
             if state.conn == Conn::Ready {
                 state.editing = None;
                 state.popup = None;

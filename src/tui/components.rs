@@ -98,6 +98,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         let mut message = message;
         let dir = props.dir.clone();
         let dry_run = props.dry_run;
+        let demo = props.demo;
         hooks.use_future(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -129,6 +130,40 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     for t in [&mut ks, &mut ws] {
                         if t.job_active() {
                             t.spin += 1;
+                        }
+                    }
+
+                    // 连接后发现 server_url 为空 → 自动切向导,从 remote
+                    // 询问开始(每次连接最多触发一次;断开/失败后重置)。
+                    if mode.get() != Mode::Wizard {
+                        for (st, rt, kind) in [
+                            (&mut *ks, rt_keys, crate::ble::DeviceKind::VibeKeys),
+                            (&mut *ws, rt_watch, crate::ble::DeviceKind::Watch),
+                        ] {
+                            let server_url_empty = st
+                                .config
+                                .as_ref()
+                                .map(|c| super::state::cfg_get(c, &["server_url"]).trim().is_empty())
+                                .unwrap_or(false);
+                            if st.conn == Conn::Ready
+                                && !st.auto_wizard_done
+                                && server_url_empty
+                            {
+                                st.auto_wizard_done = true;
+                                // BLE 会话移交给向导 runtime(设备页让出连接)。
+                                let wrt_arc = wiz_rt.read().clone();
+                                let mut wrt = wrt_arc.lock().unwrap();
+                                wrt.session = rt.session.take();
+                                let mut wst = super::wizard::WizardState::new(demo, dry_run);
+                                wst.device = kind;
+                                // 直接落步(不走 goto),历史留空:Back 不会回
+                                // 到没走过的连接前步骤。
+                                wst.step = super::wizard::Step::RemoteOutside;
+                                wst.log_line(format!("connected to {}", kind.name()), true);
+                                *wiz.write() = wst;
+                                mode.set_no_update(Mode::Wizard);
+                                break;
+                            }
                         }
                     }
                 }
@@ -209,6 +244,27 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 if outcome.exit {
                     mode.set_no_update(Mode::Tabs);
                     pkg.write().refresh_pending = true;
+                    // 会话归还对应设备页,并立刻重读配置(向导可能刚写好
+                    // server_url 等)。
+                    let kind = wst.device;
+                    let rts_arc = runtimes.read().clone();
+                    let mut rts = rts_arc.lock().unwrap();
+                    let super::state::Runtimes {
+                        keys: rt_keys,
+                        watch: rt_watch,
+                    } = &mut *rts;
+                    let mut st = if kind == DeviceKind::VibeKeys {
+                        keys.write()
+                    } else {
+                        watch.write()
+                    };
+                    let rt = if kind == DeviceKind::VibeKeys {
+                        rt_keys
+                    } else {
+                        rt_watch
+                    };
+                    rt.session = wrt.session.take();
+                    let _ = super::actions::load_config(demo, &mut st, rt);
                 }
                 return EventResult::Consumed;
             }
