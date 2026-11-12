@@ -1924,7 +1924,7 @@ fn step_screen(st: &WizardState) -> Screen {
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::WifiForm => {
-            s.title = "wizard — wifi".into();
+            s.title = "wizard — wifi (2.4G)".into();
             let existing = st
                 .config
                 .as_ref()

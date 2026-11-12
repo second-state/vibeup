@@ -176,7 +176,7 @@ impl PopupKind {
     /// (标题, 字段名列表)。
     pub fn spec(&self) -> (&'static str, &'static [&'static str]) {
         match self {
-            Self::WifiAdd => (" add wifi ", &["ssid", "pass"]),
+            Self::WifiAdd => (" add wifi (2.4G) ", &["ssid", "pass"]),
             Self::WifiPass { .. } => (" wifi: change password ", &["pass"]),
         }
     }
