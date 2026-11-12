@@ -133,43 +133,52 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                         }
                     }
 
-                    // 连接后发现 server_url 为空 → 自动切向导,从 remote
-                    // 询问开始(每次连接最多触发一次;断开/失败后重置)。
+                    // wifi 空的设备:连接成功后自动弹完整引导(从 WifiAsk),
+                    // 每次连接一次;server-url 空但 wifi 已配的设备由
+                    // server-url 行回车触发(want_wizard,从 remote 开始)。
                     if mode.get() != Mode::Wizard {
                         for (st, rt, kind) in [
                             (&mut *ks, rt_keys, crate::ble::DeviceKind::VibeKeys),
                             (&mut *ws, rt_watch, crate::ble::DeviceKind::Watch),
                         ] {
-                            let server_url_empty = st
+                            // wifi_list 缺失 / 非数组 / 空数组都算「没配过 WiFi」。
+                            let wifi_empty = st
                                 .config
                                 .as_ref()
-                                .map(|c| super::state::cfg_get(c, &["server_url"]).trim().is_empty())
-                                .unwrap_or(false);
-                            if st.conn == Conn::Ready
-                                && !st.auto_wizard_done
-                                && server_url_empty
-                            {
-                                st.auto_wizard_done = true;
-                                // BLE 会话/demo 假配置移交给向导 runtime
-                                // (设备页让出连接;demo 连接只填 mock 不开
-                                // session,所以两者都要带)。
-                                let wrt_arc = wiz_rt.read().clone();
-                                let mut wrt = wrt_arc.lock().unwrap();
-                                wrt.session = rt.session.take();
-                                wrt.mock = std::mem::take(&mut rt.mock);
-                                let mut wst = super::wizard::WizardState::new(demo, dry_run);
-                                wst.device = kind;
-                                // 带上设备配置快照:apply_broker 写完 server-url
-                                // 后会按它判断 asr 是否需要补引导。
-                                wst.config = st.config.clone();
-                                // 直接落步(不走 goto),历史留空:Back 不会回
-                                // 到没走过的连接前步骤。
-                                wst.step = super::wizard::Step::RemoteOutside;
-                                wst.log_line(format!("connected to {}", kind.name()), true);
-                                *wiz.write() = wst;
-                                mode.set_no_update(Mode::Wizard);
-                                break;
+                                .and_then(|c| c.get("wifi_list"))
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.is_empty())
+                                .unwrap_or(true);
+                            let fire = st.want_wizard || (st.conn == Conn::Ready && wifi_empty && !st.auto_wizard_done);
+                            if !fire {
+                                continue;
                             }
+                            let full = wifi_empty;
+                            if st.want_wizard {
+                                st.want_wizard = false;
+                            } else {
+                                st.auto_wizard_done = true;
+                            }
+                            let wrt_arc = wiz_rt.read().clone();
+                            let mut wrt = wrt_arc.lock().unwrap();
+                            wrt.session = rt.session.take();
+                            wrt.mock = std::mem::take(&mut rt.mock);
+                            let mut wst = super::wizard::WizardState::new(demo, dry_run);
+                            wst.device = kind;
+                            // 带上设备配置快照:apply_broker 写完 server-url
+                            // 后会按它判断 asr 是否需要补引导。
+                            wst.config = st.config.clone();
+                            // 直接落步(不走 goto),历史留空:Back 不会回
+                            // 到没走过的连接前步骤。
+                            wst.step = if full {
+                                super::wizard::Step::WifiAsk
+                            } else {
+                                super::wizard::Step::RemoteOutside
+                            };
+                            wst.log_line(format!("connected to {}", kind.name()), true);
+                            *wiz.write() = wst;
+                            mode.set_no_update(Mode::Wizard);
+                            break;
                         }
                     }
                 }

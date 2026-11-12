@@ -667,7 +667,10 @@ pub struct DeviceState {
     pub popup: Option<PopupState>,
     /// keymap 编辑弹窗(键位列表 + 行内编辑)。
     pub keymap_popup: Option<KeymapPopupState>,
-    /// 连接后自动进向导(remote 引导)只提示一次;断开/失败后重置。
+    /// server-url 空行回车 → 转交向导引导(remote 段;tick 循环读取执行)。
+    pub want_wizard: bool,
+    /// 连接后 wifi 仍为空 → 自动弹完整引导,每次连接只弹一次;
+    /// 断开/失败后重置。
     pub auto_wizard_done: bool,
 }
 

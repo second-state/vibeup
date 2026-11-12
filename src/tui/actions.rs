@@ -1755,7 +1755,29 @@ fn row_action(state: &mut DeviceState, rt: &mut DeviceRuntime, demo: bool, messa
             *message = format!("{label}: {}", describe(&res, demo));
             after_action(demo, state, rt, res.is_ok(), message);
         }
-        RowAction::Edit(_) => {
+        RowAction::Edit(field) => {
+            // wifi 已配但 server-url 为空:回车不进行行内编辑,转交向导引导
+            // (从 remote 段开始)。tick 循环读取 want_wizard 执行移交。
+            // wifi 也空的设备在连接后已经自动弹过完整引导,这里照旧行内编辑。
+            let wifi_empty = state
+                .config
+                .as_ref()
+                .and_then(|c| c.get("wifi_list"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(true);
+            if field == Field::ServerUrl
+                && !wifi_empty
+                && state
+                    .config
+                    .as_ref()
+                    .map(|c| super::state::cfg_get(c, &["server_url"]).trim().is_empty())
+                    .unwrap_or(false)
+            {
+                state.want_wizard = true;
+                *message = "opening the setup wizard…".into();
+                return;
+            }
             // 预填当前值:方便只改一部分。
             let value = state.rows[state.sel].value.clone();
             state.editing = Some((state.sel, super::state::Input::with_str(&value)));

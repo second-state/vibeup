@@ -106,13 +106,11 @@ pub(super) fn demo_connect_job(kind: DeviceKind, bare: bool) -> Job {
     })
 }
 
-/// 未配置设备的 bare 假配置:无 asr、server_url 置空。
+/// 未配置设备的 bare 假配置:无 asr、server_url 置空、wifi_list 空
+/// (触发完整引导链:WifiAsk → 输入法 → vibekeys → remote)。
 pub(super) fn bare_config(kind: DeviceKind) -> serde_json::Value {
     let mut v = serde_json::json!({
-        "wifi_list": [
-            {"ssid": "Home", "pass": "horse-battery"},
-            {"ssid": "Office", "pass": "correct-horse"}
-        ],
+        "wifi_list": [],
         "server_url": "",
     });
     if kind == DeviceKind::VibeKeys {
