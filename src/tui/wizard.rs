@@ -816,6 +816,7 @@ fn apply_broker(
             st.watch_done = true;
         }
         st.choice = 0;
+        mark_asr_pending(st);
         goto(st, Step::Done);
         return;
     }
@@ -828,6 +829,7 @@ fn apply_broker(
         st.watch_done = true;
     }
     st.choice = 0;
+    mark_asr_pending(st);
     goto(st, Step::Done);
 }
 
@@ -849,6 +851,26 @@ fn input_next(st: &WizardState) -> Step {
         Step::Done
     } else {
         Step::VibekeysApp
+    }
+}
+
+/// 设备 asr_config.uri 是否为空(无快照 / 缺字段 / 空串都算)。
+fn asr_empty(st: &WizardState) -> bool {
+    st.config
+        .as_ref()
+        .and_then(|c| c.get("asr_config"))
+        .and_then(|a| a.get("uri"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+}
+
+/// 键盘 + asr 为空 → Done 之后还要补一段输入法/ASR 设置。
+/// 只在写完 server-url 的落点前调用(正常向导和自动补配会话共用;
+/// Done 页见 asr_pending 就跳 InputMethod,设完经 input_next 回 Done)。
+fn mark_asr_pending(st: &mut WizardState) {
+    if st.device == DeviceKind::VibeKeys && asr_empty(st) {
+        st.asr_pending = true;
     }
 }
 
@@ -1475,6 +1497,7 @@ pub fn wizard_key(
                         st.choice = 0;
                         st.pending_broker = None;
                         st.ip_choices.clear();
+                        mark_asr_pending(st);
                         goto(st, Step::Done);
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
