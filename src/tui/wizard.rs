@@ -125,6 +125,10 @@ pub struct WizardState {
     pub log: Vec<(String, bool)>,
     /// 手表已配置完。
     pub watch_done: bool,
+    /// 自动补配会话:Done 页发现 asr 为空 → 再走一遍输入法设置。
+    pub asr_pending: bool,
+    /// 自动补配会话:输入法设置完直接回 Done,不重走安装/plugin/remote 链。
+    pub auto_session: bool,
     /// vibetty 已就绪(本来就有或本次装的)。
     pub vibetty_done: bool,
     /// 16b:vibetty config 里的原 broker(含 loopback host)与本机 IP 候选。
@@ -170,6 +174,8 @@ impl WizardState {
             ts_ip: None,
             log: Vec::new(),
             watch_done: false,
+            asr_pending: false,
+            auto_session: false,
             vibetty_done: false,
             pending_broker: None,
             ip_choices: Vec::new(),
@@ -836,6 +842,16 @@ fn farewell_text(st: &WizardState) -> String {
     .to_string()
 }
 
+/// 输入法设置完的去向:完整向导走安装链;自动补配会话直接回 Done,
+/// 不重走 vibekeys 安装 / plugin / remote。
+fn input_next(st: &WizardState) -> Step {
+    if st.auto_session {
+        Step::Done
+    } else {
+        Step::VibekeysApp
+    }
+}
+
 fn prep_form(st: &mut WizardState) {
     st.input = Input::default();
     st.input2 = Input::default();
@@ -1096,7 +1112,7 @@ pub fn wizard_key(
                             st.log_line("keyboard MIC = default (ctrl+alt)", true);
                             st.log_line("prefer_builtin_asr = off", true);
                             st.choice = 0;
-                            goto(st, Step::VibekeysApp);
+                            goto(st, input_next(st));
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
                     }
@@ -1125,7 +1141,7 @@ pub fn wizard_key(
                         st.log_line(format!("keyboard MIC = {binding}"), true);
                         st.log_line("prefer_builtin_asr = off", true);
                         st.choice = 0;
-                        goto(st, Step::VibekeysApp);
+                        goto(st, input_next(st));
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
@@ -1191,7 +1207,7 @@ pub fn wizard_key(
                             st.log_line(format!("asr_config = {url}"), true);
                             st.log_line("prefer_builtin_asr = on", true);
                             st.choice = 0;
-                            goto(st, Step::VibekeysApp);
+                            goto(st, input_next(st));
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
                     }
@@ -1486,6 +1502,15 @@ pub fn wizard_key(
         // 17:完成确认页。Enter 结束。
         Step::Done => {
             if enter {
+                // 自动补配会话:broker 设置完发现 asr 还是空的 → 接一段
+                // 输入法设置,设完经 input_next 回这里(只补一次)。
+                if st.asr_pending {
+                    st.asr_pending = false;
+                    st.auto_session = true;
+                    st.choice = 0;
+                    goto(st, Step::InputMethod);
+                    return Outcome::none();
+                }
                 goto(st, Step::Farewell);
             }
         }
@@ -2081,7 +2106,11 @@ fn step_screen(st: &WizardState) -> Screen {
                     .collect();
             }
             s.body = choices(st, &["Continue"]);
-            s.hint = vec![hint_line("Enter continue")];
+            s.hint = vec![hint_line(if st.asr_pending {
+                "Enter continue — input setup is next"
+            } else {
+                "Enter continue"
+            })];
         }
         Step::Farewell => {
             s.title = "wizard — all set".into();

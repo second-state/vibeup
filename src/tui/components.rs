@@ -156,6 +156,17 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                                 wrt.session = rt.session.take();
                                 let mut wst = super::wizard::WizardState::new(demo, dry_run);
                                 wst.device = kind;
+                                // 键盘 + asr_config.uri 为空 → broker 设完再补
+                                // 一段输入法/ASR 设置(手表没有 ASR 步骤)。
+                                let asr_empty = st
+                                    .config
+                                    .as_ref()
+                                    .and_then(|c| c.get("asr_config"))
+                                    .and_then(|a| a.get("uri"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().is_empty())
+                                    .unwrap_or(true);
+                                wst.asr_pending = asr_empty && kind == DeviceKind::VibeKeys;
                                 // 直接落步(不走 goto),历史留空:Back 不会回
                                 // 到没走过的连接前步骤。
                                 wst.step = super::wizard::Step::RemoteOutside;
