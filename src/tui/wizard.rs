@@ -2218,7 +2218,23 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
         let gap = 0u16; // 三框边框紧贴,中间不空行
         let total = h_text + gap + h_body + gap + h_hint;
         if total > area.height {
-            return; // 终端太矮:宁可空白也不画残框
+            // 终端太矮:不画残框,给一行居中提示。
+            let msg = format!(
+                "terminal too small — need {} rows × {} cols, have {} × {}",
+                total,
+                w,
+                area.height,
+                area.width
+            );
+            let x = area.x + (area.width.saturating_sub(msg.chars().count() as u16)) / 2;
+            let y = area.y + area.height / 2;
+            buf.set_string(
+                x.min(area.x + area.width.saturating_sub(1)),
+                y.min(area.y + area.height.saturating_sub(1)),
+                &msg,
+                Style::new().red(),
+            );
+            return;
         }
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(total)) / 2;
