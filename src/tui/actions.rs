@@ -1424,7 +1424,7 @@ fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Opti
                 if key.code == KeyCode::Char('d') {
                     return Some("share — nothing to unshare without herdr".into());
                 }
-                if crate::terminal::detect() == crate::terminal::Terminal::Warp {
+                if crate::terminal::active_name() == "warp" {
                     return Some(
                         "warp can't be auto-opened — run `vibetty` in warp, or install herdr"
                             .into(),

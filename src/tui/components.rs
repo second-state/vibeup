@@ -1158,7 +1158,7 @@ pub fn share_page_element(
 ) -> AnyElement<'static> {
     #[cfg(windows)]
     let el: AnyElement<'static> =
-        vibetty_launch_popup(crate::terminal::detect() == crate::terminal::Terminal::Warp);
+        vibetty_launch_popup(crate::terminal::active_name() == "warp");
     #[cfg(unix)]
     let el: AnyElement<'static> = {
         let props = SharePageProps { state: share };
@@ -1174,9 +1174,7 @@ pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
     if st.checked && !st.installed {
         // 没有 herdr 不劝安装:直接给一个居中的「起独立 vibetty 会话」弹窗
         // (Warp 终端则显示说明文案,见 VibettyLaunchWidget)。
-        return vibetty_launch_popup(
-            crate::terminal::detect() == crate::terminal::Terminal::Warp,
-        );
+        return vibetty_launch_popup(crate::terminal::active_name() == "warp");
     }
     let lines: Vec<Line<'static>> = if !st.checked {
         vec![Line::from(" checking herdr…")]
