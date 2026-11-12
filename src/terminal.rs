@@ -254,6 +254,9 @@ const FALLBACKS: &[Terminal] = &[
     Terminal::Vte,
     Terminal::Konsole,
     Terminal::WezTerm,
+    // macOS 保底:每台 mac 都有 Terminal.app;Linux 上 osascript 不在
+    // PATH,on_path 检查会自然跳过它。
+    Terminal::Apple,
 ];
 
 /// 用户当前 shell:`$SHELL`(缺省 /bin/sh)。
