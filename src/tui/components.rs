@@ -1006,8 +1006,12 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
 
 /// 居中弹窗:「没有 herdr」时起独立 vibetty 会话的出口。
 /// 自绘 Widget(手动居中 + ratatui 原生渲染),与 keymap 弹窗同一套路。
+/// `warp` = 当前终端是 Warp:没有「程序化开窗跑命令」的公开接口,
+/// 弹窗改为说明文案(装 herdr 或自己在 Warp 里跑 vibetty)。
 #[derive(Clone)]
-struct VibettyLaunchWidget;
+struct VibettyLaunchWidget {
+    warp: bool,
+}
 
 impl ratatui_kit::ratatui::widgets::Widget for VibettyLaunchWidget {
     fn render(
@@ -1021,16 +1025,34 @@ impl ratatui_kit::ratatui::widgets::Widget for VibettyLaunchWidget {
             widgets::{Clear, Paragraph},
         };
 
-        let lines = [
-            Line::from(Span::styled(
-                " Start a standalone vibetty session:",
-                Style::new().bold(),
-            )),
-            Line::from(Span::styled(
-                " ❯ Launch vibetty in a new terminal  ($ vibetty)",
-                Style::new().light_blue().bold(),
-            )),
-        ];
+        let lines: [ratatui_kit::ratatui::text::Line; 3] = if self.warp {
+            [
+                Line::from(Span::styled(
+                    " Warp doesn't support auto-opening a terminal yet.",
+                    Style::new().bold(),
+                )),
+                Line::from(Span::styled(
+                    " Install herdr to manage sessions, or start",
+                    Style::new().dark_gray(),
+                )),
+                Line::from(Span::styled(
+                    " vibetty yourself in Warp:  $ vibetty",
+                    Style::new().dark_gray(),
+                )),
+            ]
+        } else {
+            [
+                Line::from(Span::styled(
+                    " Start a standalone vibetty session:",
+                    Style::new().bold(),
+                )),
+                Line::from(Span::styled(
+                    " ❯ Launch vibetty in a new terminal  ($ vibetty)",
+                    Style::new().light_blue().bold(),
+                )),
+                Line::from(""),
+            ]
+        };
         // 宽度按最长行内容算(+ 边框 2),不写死:写窄了末行会被截断。
         let content_w = lines
             .iter()
@@ -1068,9 +1090,9 @@ impl ratatui_kit::ratatui::widgets::Widget for VibettyLaunchWidget {
     }
 }
 
-fn vibetty_launch_popup() -> AnyElement<'static> {
+fn vibetty_launch_popup(warp: bool) -> AnyElement<'static> {
     let el: AnyElement<'static> = element!(Center {
-        widget(VibettyLaunchWidget)
+        widget(VibettyLaunchWidget { warp })
     })
     .into();
     el
@@ -1135,7 +1157,8 @@ pub fn share_page_element(
     #[cfg(unix)] share: ratatui_kit::prelude::State<super::state::ShareState>,
 ) -> AnyElement<'static> {
     #[cfg(windows)]
-    let el: AnyElement<'static> = vibetty_launch_popup();
+    let el: AnyElement<'static> =
+        vibetty_launch_popup(crate::terminal::detect() == crate::terminal::Terminal::Warp);
     #[cfg(unix)]
     let el: AnyElement<'static> = {
         let props = SharePageProps { state: share };
@@ -1149,8 +1172,11 @@ pub fn share_page_element(
 pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
     let st = props.state.read().clone();
     if st.checked && !st.installed {
-        // 没有 herdr 不劝安装:直接给一个居中的「起独立 vibetty 会话」弹窗。
-        return vibetty_launch_popup();
+        // 没有 herdr 不劝安装:直接给一个居中的「起独立 vibetty 会话」弹窗
+        // (Warp 终端则显示说明文案,见 VibettyLaunchWidget)。
+        return vibetty_launch_popup(
+            crate::terminal::detect() == crate::terminal::Terminal::Warp,
+        );
     }
     let lines: Vec<Line<'static>> = if !st.checked {
         vec![Line::from(" checking herdr…")]

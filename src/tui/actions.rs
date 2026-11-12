@@ -1418,10 +1418,17 @@ fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Opti
             Some(format!("share — {} agent(s)", share.rows.len()))
         }
         KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
-            // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话。
+            // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话
+            // (Warp 没有程序化开窗的接口,提示用户自己跑)。
             if !share.installed {
                 if key.code == KeyCode::Char('d') {
                     return Some("share — nothing to unshare without herdr".into());
+                }
+                if crate::terminal::detect() == crate::terminal::Terminal::Warp {
+                    return Some(
+                        "warp can't be auto-opened — run `vibetty` in warp, or install herdr"
+                            .into(),
+                    );
                 }
                 return match crate::terminal::open_terminal("vibetty") {
                     Ok(()) => Some("opened a new terminal running vibetty".into()),
