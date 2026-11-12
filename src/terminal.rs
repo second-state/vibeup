@@ -27,6 +27,8 @@ pub enum Terminal {
     Vte,
     Konsole,
     WezTerm,
+    /// Warp(TERM_PROGRAM=WarpTerminal;深链拉起,只进检测不进兜底链)。
+    Warp,
     Apple,
     ITerm,
     /// VSCode / JetBrains 内置终端:没有可靠的命令行拉起方式,当 Unknown 处理。
@@ -46,6 +48,7 @@ impl Terminal {
             Self::Vte => "vte",
             Self::Konsole => "konsole",
             Self::WezTerm => "wezterm",
+            Self::Warp => "warp",
             Self::Apple => "terminal.app",
             Self::ITerm => "iterm",
             Self::Embedded => "embedded",
@@ -74,6 +77,7 @@ pub fn detect() -> Terminal {
     match std::env::var("TERM_PROGRAM").as_deref() {
         Ok("ghostty") => return Terminal::Ghostty,
         Ok("WezTerm") => return Terminal::WezTerm,
+        Ok("WarpTerminal") => return Terminal::Warp,
         Ok("Apple_Terminal") => return Terminal::Apple,
         Ok("iTerm.app") => return Terminal::ITerm,
         Ok("vscode") | Ok("Hyper") | Ok("tabby") => return Terminal::Embedded,
@@ -307,6 +311,20 @@ fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String
         Terminal::Vte => sh("gnome-terminal", &["--"]),
         Terminal::Konsole => sh("konsole", &["-e"]),
         Terminal::WezTerm => sh("wezterm", &["start", "--"]),
+        // Warp 没有可用的「带命令开窗」CLI,走 warp:// 深链:macOS 用 open,
+        // Linux 用 xdg-open(cmd 做 percent-encode)。只在检测到 Warp 时才走
+        // 这条路,所以 scheme 一定已注册。
+        Terminal::Warp => {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            Some((
+                opener.to_string(),
+                vec![format!("warp://action/new_tab?cmd={}", percent_encode(cmd))],
+            ))
+        }
         Terminal::Apple => {
             // AppleScript 双引号转义后塞进 do script。
             let esc = cmd.replace('\\', "\\\\").replace('"', "\\\"");
@@ -338,6 +356,21 @@ fn launch_for(t: Terminal, cmd: &str, shell: &str) -> Option<(String, Vec<String
     }
 }
 
+/// URL percent-encode:保留 unreserved 字符(A-Z a-z 0-9 - _ . ~),其余
+/// 编成 %XX。深链 query 参数用(%20 而非 +,避免被解析成空格歧义)。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// 后台拉起,不阻塞、不留僵尸(等子进程的线程收尾)。
 fn spawn_detached(bin: &str, args: &[String]) -> anyhow::Result<()> {
     let mut child = Command::new(bin)
@@ -366,6 +399,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn warp_launches_via_deeplink() {
+        let (bin, args) = launch_for(Terminal::Warp, "echo hi", "/bin/zsh").unwrap();
+        let expect_bin = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(bin, expect_bin);
+        assert_eq!(args, vec!["warp://action/new_tab?cmd=echo%20hi"]);
+    }
+
+    #[test]
+    fn percent_encode_keeps_unreserved_only() {
+        assert_eq!(percent_encode("abc-1_2.x"), "abc-1_2.x");
+        assert_eq!(percent_encode("a b/c"), "a%20b%2Fc");
+        assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(percent_encode(""), "");
+    }
+
     fn launch_args_wrap_user_shell() {
         // zsh/bash/fish 走登录+交互模式(读 rc,保住 PATH)。
         let (bin, args) = launch_for(Terminal::Ghostty, "echo hi", "/bin/zsh").unwrap();
