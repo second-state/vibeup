@@ -4,6 +4,7 @@
 //! installs them as `<bin>-<version>` + symlink (matches each repo's
 //! install.sh convention).
 
+mod autoshare;
 mod ble;
 mod config_cmd;
 mod install;
@@ -119,6 +120,14 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+    /// Auto-share every herdr agent to vibetty (background daemon; macOS/Linux only)
+    Autoshare {
+        /// Run detached as a background daemon (logs to ~/.vibetty/logs/)
+        #[arg(short = 'd', long)]
+        detach: bool,
+        #[command(subcommand)]
+        cmd: Option<autoshare::AutoshareCmd>,
     },
 }
 
@@ -243,6 +252,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Config { cmd } => run_config(cmd, cli.dry_run),
+        Cmd::Autoshare { detach, cmd } => autoshare::dispatch(detach, cmd, cli.dry_run),
     }
 }
 

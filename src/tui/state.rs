@@ -641,7 +641,23 @@ pub struct ShareState {
     /// 当前 vibetty share 会话(重扫时同步拉;列表展示用)。
     #[cfg(unix)]
     pub shared: Vec<crate::share_manager::Session>,
+    /// autoshare daemon 在跑(`vibeup autoshare -d`;重扫时 probe 控制 socket)。
+    #[cfg(unix)]
+    pub autoshare_on: bool,
     pub sel: usize,
+}
+
+impl ShareState {
+    /// autoshare daemon 是否在跑(windows 恒 false;footer 文案用)。
+    #[cfg(unix)]
+    pub fn autoshare_running(&self) -> bool {
+        self.autoshare_on
+    }
+
+    #[cfg(windows)]
+    pub fn autoshare_running(&self) -> bool {
+        false
+    }
 }
 
 // ===== 设备页整体状态 =====

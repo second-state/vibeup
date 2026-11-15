@@ -1013,24 +1013,24 @@ pub fn handle_key(
         match code {
             KeyCode::Char('1') => {
                 switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
             }
             KeyCode::Char('2') => {
                 switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
             }
             KeyCode::Char('3') => {
                 switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
             }
             KeyCode::Char('4') => {
                 switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
                 switch_to(&mut tab, next, keys, watch, share);
-                return KeyOutcome::msg(tab_message(next));
+                return KeyOutcome::msg(tab_message(next, share));
             }
             KeyCode::Esc => {
                 return KeyOutcome {
@@ -1123,24 +1123,24 @@ pub fn handle_key(
         match code {
             KeyCode::Char('1') => {
                 switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
             }
             KeyCode::Char('2') => {
                 switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
             }
             KeyCode::Char('3') => {
                 switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
             }
             KeyCode::Char('4') => {
                 switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
                 switch_to(&mut tab, next, keys, watch, share);
-                return KeyOutcome::msg(tab_message(next));
+                return KeyOutcome::msg(tab_message(next, share));
             }
             // 这里已无弹窗/编辑可关闭,Esc = 退出应用。
             KeyCode::Esc => {
@@ -1254,24 +1254,24 @@ pub fn handle_key(
         }
         KeyCode::Char('1') => {
             switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+            return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
         }
         KeyCode::Char('2') => {
             switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Share));
+            return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
         }
         KeyCode::Char('3') => {
             switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+            return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
         }
         KeyCode::Char('4') => {
             switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+            return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
         }
         KeyCode::Tab => {
             let next = tab.get().next();
             switch_to(&mut tab, next, keys, watch, share);
-            return KeyOutcome::msg(tab_message(next));
+            return KeyOutcome::msg(tab_message(next, share));
         }
         KeyCode::Char('j') | KeyCode::Down => {
             pkg.sel = (pkg.sel + 1).min(pkg.entries.len().saturating_sub(1));
@@ -1318,7 +1318,7 @@ pub fn handle_key(
     KeyOutcome::msg(std::mem::take(&mut pkg.message))
 }
 
-fn tab_message(t: super::state::Tab) -> String {
+fn tab_message(t: super::state::Tab, share: &super::state::ShareState) -> String {
     match t {
         super::state::Tab::Keyboard => {
             "vibekeys — Enter run/edit · r re-read config · Esc quit".into()
@@ -1328,7 +1328,13 @@ fn tab_message(t: super::state::Tab) -> String {
             "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
                 .into()
         }
-        super::state::Tab::Share => "share — Enter toggle · r refresh · Esc quit".into(),
+        // autoshare daemon 在跑:agent 自动 share,footer 宣传 a 停止而不是手动 toggle。
+        super::state::Tab::Share if share.autoshare_running() => {
+            "share — autoshare on · a stop · r refresh · Esc quit".into()
+        }
+        super::state::Tab::Share => {
+            "share — Enter toggle · a autoshare · r refresh · Esc quit".into()
+        }
     }
 }
 
@@ -1341,7 +1347,7 @@ fn switch_tab(
 ) {
     let next = tab.get().next();
     switch_to(tab, next, keys, watch, share);
-    *message = tab_message(next);
+    *message = tab_message(next, share);
 }
 
 /// 进 Share 页:检测 herdr 并同步扫描 agent 列表(几次进程调用,毫秒级)。
@@ -1388,6 +1394,11 @@ fn share_rescan(share: &mut super::state::ShareState) {
     }
     // share 状态拉取失败不挡列表(显示成没 share);d 动作会用实时 list 兜底。
     share.shared = crate::share_manager::list().unwrap_or_default();
+    // autoshare daemon 在跑?probe 一下控制 socket(只读;残留 socket 不在这清)。
+    share.autoshare_on = crate::autoshare::socket_path()
+        .and_then(|p| crate::autoshare::control::probe(&p).ok())
+        .map(|p| p == crate::autoshare::control::Probe::Running)
+        .unwrap_or(false);
 }
 
 /// windows:没有 herdr,恒为「未安装」,页面只给独立 vibetty 出口。
@@ -1414,6 +1425,26 @@ fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Opti
         KeyCode::Char('r') => {
             share_rescan(share);
             Some(format!("share — {} agent(s)", share.rows.len()))
+        }
+        KeyCode::Char('a') => {
+            // autoshare 开关:跑着就停(控制 socket),没跑就拉起(detached)。
+            if share.autoshare_running() {
+                match crate::autoshare::control::stop_daemon() {
+                    Ok(msg) => {
+                        share_rescan(share);
+                        Some(msg)
+                    }
+                    Err(e) => Some(format!("autoshare stop failed: {e:#}")),
+                }
+            } else {
+                match crate::autoshare::daemon::spawn_detached() {
+                    Ok(msg) => {
+                        share_rescan(share);
+                        Some(msg)
+                    }
+                    Err(e) => Some(format!("autoshare start failed: {e:#}")),
+                }
+            }
         }
         KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
             // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话

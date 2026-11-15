@@ -99,6 +99,19 @@ vibeup config reset watch                   # 重启设备使配置生效
 
 多数子命令支持 `--reset`,写完立即重启设备让新配置生效。
 
+### Autoshare 守护进程(macOS / Linux)
+
+后台 daemon,把 herdr 里的全部 agent pane 自动 share 到 vibetty:启动时 share 所有现有 agent,并订阅 herdr 的 `pane.agent_detected` 事件,新 agent 一出现就自动 share(只 share 不 unshare——agent 关闭不会回收对应的 share)。同时拉起 `vibetty broker`(best-effort:端口被占或 `~/.vibetty/config.toml` 没有 `[mqtt]` 段时,daemon 照常运行)。
+
+```sh
+vibeup autoshare -d      # 后台启动(日志在 ~/.vibetty/logs/vibeup-autoshare.log)
+vibeup autoshare         # 前台运行(日志走 stderr)
+vibeup autoshare status  # JSON:share 列表、broker 状态、herdr 连接、运行时长
+vibeup autoshare stop    # 停止 daemon(同时杀掉它拉起的 `vibetty broker` 子进程)
+```
+
+探活与控制走 `~/.vibetty/autoshare.sock` 这个 unix socket 文件,不用 HTTP;`kill -9` 留下的残留 socket 会在下次启动时自动识别清理。需要 herdr 且装好 vibetty 插件,否则拒绝启动。Windows 不可用。
+
 ### TUI
 
 ```sh

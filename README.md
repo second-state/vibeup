@@ -130,6 +130,19 @@ vibeup config keymap vibekeys MIC Ctrl+X          # MIC sends Ctrl+X
 vibeup config keymap vibekeys ESC '"/compact\n"'  # ESC types /compact + Enter
 ```
 
+### Autoshare daemon (macOS / Linux)
+
+A background daemon that keeps every herdr agent pane shared to vibetty: on start it shares all current agents, subscribes to herdr's `pane.agent_detected` event, and shares new agents as they appear (share-only — closing an agent never unshares it). It also spawns `vibetty broker` (best-effort: if the port is taken or `~/.vibetty/config.toml` has no `[mqtt]` section, the daemon keeps running without it).
+
+```sh
+vibeup autoshare -d      # start detached (logs to ~/.vibetty/logs/vibeup-autoshare.log)
+vibeup autoshare         # run in the foreground (logs to stderr)
+vibeup autoshare status  # JSON: shared targets, broker state, herdr connection, uptime
+vibeup autoshare stop    # stop the daemon (kills its `vibetty broker` child too)
+```
+
+Liveness and control go through a unix socket file at `~/.vibetty/autoshare.sock` — no HTTP. A leftover socket after a `kill -9` is detected and cleaned up on the next start. Requires herdr with the vibetty plugin installed; refuses to start otherwise. Not available on Windows.
+
 ### TUI
 
 ```sh
