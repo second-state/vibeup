@@ -415,23 +415,9 @@ pub(crate) fn parse_key_binding(input: &str) -> serde_json::Value {
         "bracketright",
     ];
     const VALID_MODIFIERS: &[&str] = &[
-        "ctrl",
-        "alt",
-        "option",
-        "shift",
-        "meta",
-        "win",
-        "cmd",
+        "ctrl", "alt", "option", "shift", "meta", "win", "cmd",
         // 右侧变体(别名归一成固件键名表的写法)。
-        "rctrl",
-        "rshift",
-        "ralt",
-        "roption",
-        "rgui",
-        "rwin",
-        "rmeta",
-        "rsuper",
-        "rcommand",
+        "rctrl", "rshift", "ralt", "roption", "rgui", "rwin", "rmeta", "rsuper", "rcommand",
     ];
 
     // 单个大写字母 / 数字 = 单键 combo。

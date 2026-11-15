@@ -1328,9 +1328,7 @@ fn tab_message(t: super::state::Tab) -> String {
             "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
                 .into()
         }
-        super::state::Tab::Share => {
-            "share — s/Enter toggle · d unshare · r refresh · Esc quit".into()
-        }
+        super::state::Tab::Share => "share — Enter toggle · r refresh · Esc quit".into(),
     }
 }
 

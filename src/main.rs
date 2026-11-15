@@ -232,7 +232,11 @@ fn main() -> Result<()> {
             let log = if name == "all" {
                 install::uninstall_all(&dir, cli.dry_run)?
             } else {
-                let p = if name == "self" { &pkg::SELF } else { pkg::find(&name)? };
+                let p = if name == "self" {
+                    &pkg::SELF
+                } else {
+                    pkg::find(&name)?
+                };
                 install::uninstall(p, &dir, cli.dry_run)?
             };
             print!("{log}");

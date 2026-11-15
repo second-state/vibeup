@@ -149,7 +149,8 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                                 .and_then(|v| v.as_array())
                                 .map(|a| a.is_empty())
                                 .unwrap_or(true);
-                            let fire = st.want_wizard || (st.conn == Conn::Ready && wifi_empty && !st.auto_wizard_done);
+                            let fire = st.want_wizard
+                                || (st.conn == Conn::Ready && wifi_empty && !st.auto_wizard_done);
                             if !fire {
                                 continue;
                             }
@@ -411,12 +412,16 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let page_border = ratatui_kit::components::BorderProps {
         borders: Borders::ALL,
         border_style: Some(Style::new().dark_gray()),
-        // Share 页的内容框左上角显示检测到的终端(launch 用哪个就标哪个)。
+        // Share 页的内容框左上角标 launch 走哪条路:herdr 已装 = herdr
+        // (插件 share,不开新终端);否则 = 检测到的终端(open_terminal 目标,
+        // 检测不出就是 unknown)。installed 在进 tab 时同步检测,读前已就绪。
         top_title: (tab_val == Tab::Share).then(|| {
-            Line::from(Span::styled(
-                format!(" {} ", crate::terminal::active_name()),
-                Style::new().dark_gray(),
-            ))
+            let name = if share.read().installed {
+                "herdr"
+            } else {
+                crate::terminal::active_name()
+            };
+            Line::from(Span::styled(format!(" {name} "), Style::new().dark_gray()))
         }),
         children: page_children,
         ..Default::default()
@@ -1157,8 +1162,7 @@ pub fn share_page_element(
     #[cfg(unix)] share: ratatui_kit::prelude::State<super::state::ShareState>,
 ) -> AnyElement<'static> {
     #[cfg(windows)]
-    let el: AnyElement<'static> =
-        vibetty_launch_popup(crate::terminal::active_name() == "warp");
+    let el: AnyElement<'static> = vibetty_launch_popup(crate::terminal::active_name() == "warp");
     #[cfg(unix)]
     let el: AnyElement<'static> = {
         let props = SharePageProps { state: share };

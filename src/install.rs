@@ -366,9 +366,7 @@ fn cli_uninstall(cli: &str, args: &[&str]) -> String {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let combined = format!("{stdout}{stderr}");
             let lower = combined.to_lowercase();
-            if lower.contains("not found in installed plugins")
-                || lower.contains("not installed")
-            {
+            if lower.contains("not found in installed plugins") || lower.contains("not installed") {
                 format!("{cli} plugin: {label} is not installed — nothing to remove\n")
             } else if o.status.success() {
                 format!("Removed {cli} plugin: {label}\n")
