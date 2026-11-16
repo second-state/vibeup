@@ -58,7 +58,11 @@ pub fn run(dir: &Option<PathBuf>, json: bool) -> Result<()> {
     }
 
     // 人类可读表格(列宽自适应;* = 有更新)。
-    let disp_installed = |r: &PkgStatus| r.installed.clone().unwrap_or_else(|| "not installed".into());
+    let disp_installed = |r: &PkgStatus| {
+        r.installed
+            .clone()
+            .unwrap_or_else(|| "not installed".into())
+    };
     let disp_latest = |r: &PkgStatus| r.latest.clone().unwrap_or_else(|| "?".into());
     let disp_pre = |r: &PkgStatus| match (&r.latest_pre, &r.latest) {
         (Some(pre), _) => pre.clone(),
@@ -74,7 +78,11 @@ pub fn run(dir: &Option<PathBuf>, json: bool) -> Result<()> {
     };
 
     let w0 = rows.iter().map(|r| disp_name(r).len()).max().unwrap_or(0);
-    let w1 = rows.iter().map(|r| disp_installed(r).len()).max().unwrap_or(0);
+    let w1 = rows
+        .iter()
+        .map(|r| disp_installed(r).len())
+        .max()
+        .unwrap_or(0);
     let w2 = rows.iter().map(|r| disp_latest(r).len()).max().unwrap_or(0);
     println!(
         "{:<w0$}  {:<w1$}  {:<w2$}  latest-pre",

@@ -51,21 +51,23 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let mut ask_choice: State<usize> = hooks.use_state(|| 0);
     // 嵌入式向导的状态与后台句柄。
     let wiz = hooks.use_state(|| super::wizard::WizardState::new(props.demo, props.dry_run));
-    let wiz_rt: State<std::sync::Arc<std::sync::Mutex<super::wizard::WizardRuntime>>> =
-        hooks.use_state(|| std::sync::Arc::new(std::sync::Mutex::new(
-            super::wizard::WizardRuntime::default(),
-        )));
+    let wiz_rt: State<std::sync::Arc<std::sync::Mutex<super::wizard::WizardRuntime>>> = hooks
+        .use_state(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(
+                super::wizard::WizardRuntime::default(),
+            ))
+        });
     let keys = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::VibeKeys, props.demo));
     let watch = hooks.use_state(|| super::state::DeviceState::new(DeviceKind::Watch, props.demo));
-    let runtimes = hooks.use_state(|| {
-        std::sync::Arc::new(std::sync::Mutex::new(super::state::Runtimes::new()))
-    });
+    let runtimes = hooks
+        .use_state(|| std::sync::Arc::new(std::sync::Mutex::new(super::state::Runtimes::new())));
     let pkg = hooks.use_state(super::state::PkgState::default);
     let pkg_rt = hooks.use_state(|| {
         std::sync::Arc::new(std::sync::Mutex::new(super::state::PkgRuntime::default()))
     });
-    let mut message =
-        hooks.use_state(|| "Tab tabs · ↑↓ select · Enter actions · Esc quit".to_string());
+    let share = hooks.use_state(super::state::ShareState::default);
+    let mut message = hooks
+        .use_state(|| "Tab tabs · ↑↓ select · Enter actions · w wizard · Esc quit".to_string());
     let allow_pre = hooks.use_state(|| false);
     let mut exit = hooks.use_exit();
 
@@ -96,6 +98,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         let mut message = message;
         let dir = props.dir.clone();
         let dry_run = props.dry_run;
+        let demo = props.demo;
         hooks.use_future(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -106,7 +109,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 {
                     let rts_arc = runtimes.read().clone();
                     let mut rts = rts_arc.lock().unwrap();
-                    let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
+                    let super::state::Runtimes {
+                        keys: rt_keys,
+                        watch: rt_watch,
+                    } = &mut *rts;
                     let mut ks = keys.write();
                     if let Some(m) = actions::poll_job(&mut ks, rt_keys) {
                         msg = msg.or(Some(m));
@@ -124,6 +130,56 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     for t in [&mut ks, &mut ws] {
                         if t.job_active() {
                             t.spin += 1;
+                        }
+                    }
+
+                    // wifi 空的设备:连接成功后自动弹完整引导(从 WifiAsk),
+                    // 每次连接一次;server-url 空但 wifi 已配的设备由
+                    // server-url 行回车触发(want_wizard,从 remote 开始)。
+                    if mode.get() != Mode::Wizard {
+                        for (st, rt, kind) in [
+                            (&mut *ks, rt_keys, crate::ble::DeviceKind::VibeKeys),
+                            (&mut *ws, rt_watch, crate::ble::DeviceKind::Watch),
+                        ] {
+                            // wifi_list 缺失 / 非数组 / 空数组都算「没配过 WiFi」。
+                            let wifi_empty = st
+                                .config
+                                .as_ref()
+                                .and_then(|c| c.get("wifi_list"))
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.is_empty())
+                                .unwrap_or(true);
+                            let fire = st.want_wizard
+                                || (st.conn == Conn::Ready && wifi_empty && !st.auto_wizard_done);
+                            if !fire {
+                                continue;
+                            }
+                            let full = wifi_empty;
+                            if st.want_wizard {
+                                st.want_wizard = false;
+                            } else {
+                                st.auto_wizard_done = true;
+                            }
+                            let wrt_arc = wiz_rt.read().clone();
+                            let mut wrt = wrt_arc.lock().unwrap();
+                            wrt.session = rt.session.take();
+                            wrt.mock = std::mem::take(&mut rt.mock);
+                            let mut wst = super::wizard::WizardState::new(demo, dry_run);
+                            wst.device = kind;
+                            // 带上设备配置快照:apply_broker 写完 server-url
+                            // 后会按它判断 asr 是否需要补引导。
+                            wst.config = st.config.clone();
+                            // 直接落步(不走 goto),历史留空:Back 不会回
+                            // 到没走过的连接前步骤。
+                            wst.step = if full {
+                                super::wizard::Step::WifiAsk
+                            } else {
+                                super::wizard::Step::RemoteOutside
+                            };
+                            wst.log_line(format!("connected to {}", kind.name()), true);
+                            *wiz.write() = wst;
+                            mode.set_no_update(Mode::Wizard);
+                            break;
                         }
                     }
                 }
@@ -157,11 +213,10 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 };
                 if refresh_now {
                     let dir = dir.clone();
-                    let entries = tokio::task::spawn_blocking(move || {
-                        super::state::refresh_entries(&dir)
-                    })
-                    .await
-                    .unwrap_or_default();
+                    let entries =
+                        tokio::task::spawn_blocking(move || super::state::refresh_entries(&dir))
+                            .await
+                            .unwrap_or_default();
                     let mut ps = pkg.write();
                     ps.entries = entries;
                     ps.sel = ps.sel.min(ps.entries.len().saturating_sub(1));
@@ -194,19 +249,39 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 
             // 嵌入式向导:吞掉所有按键;退出向导 → 回标签页 + 刷新包表。
             if mode.get() == Mode::Wizard {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     exit();
                     return EventResult::Consumed;
                 }
                 let wrt_arc = wiz_rt.read().clone();
                 let mut wrt = wrt_arc.lock().unwrap();
                 let mut wst = wiz.write();
-                let outcome =
-                    super::wizard::wizard_key(&mut wst, &mut wrt, &key, &dir);
+                let outcome = super::wizard::wizard_key(&mut wst, &mut wrt, &key, &dir);
                 if outcome.exit {
                     mode.set_no_update(Mode::Tabs);
                     pkg.write().refresh_pending = true;
+                    // 会话归还对应设备页,并立刻重读配置(向导可能刚写好
+                    // server_url 等)。
+                    let kind = wst.device;
+                    let rts_arc = runtimes.read().clone();
+                    let mut rts = rts_arc.lock().unwrap();
+                    let super::state::Runtimes {
+                        keys: rt_keys,
+                        watch: rt_watch,
+                    } = &mut *rts;
+                    let mut st = if kind == DeviceKind::VibeKeys {
+                        keys.write()
+                    } else {
+                        watch.write()
+                    };
+                    let rt = if kind == DeviceKind::VibeKeys {
+                        rt_keys
+                    } else {
+                        rt_watch
+                    };
+                    rt.session = wrt.session.take();
+                    rt.mock = std::mem::take(&mut wrt.mock);
+                    let _ = super::actions::load_config(demo, &mut st, rt);
                 }
                 return EventResult::Consumed;
             }
@@ -224,8 +299,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                         if yes {
                             *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
                             let wrt_arc = wiz_rt.read().clone();
-                            *wrt_arc.lock().unwrap() =
-                                super::wizard::WizardRuntime::default();
+                            *wrt_arc.lock().unwrap() = super::wizard::WizardRuntime::default();
                             mode.set_no_update(Mode::Wizard);
                         }
                     }
@@ -239,7 +313,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
             if key.code == KeyCode::Char('w')
                 && mode.get() == Mode::Tabs
                 && tab.get() == Tab::Packages
-                && !pkg.read().menu.is_some()
+                && pkg.read().menu.is_none()
                 && !pkg.read().running
             {
                 *wiz.write() = super::wizard::WizardState::new(demo, dry_run);
@@ -251,12 +325,16 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 
             let rts_arc = runtimes.read().clone();
             let mut rts = rts_arc.lock().unwrap();
-            let super::state::Runtimes { keys: rt_keys, watch: rt_watch } = &mut *rts;
+            let super::state::Runtimes {
+                keys: rt_keys,
+                watch: rt_watch,
+            } = &mut *rts;
             let mut ks = keys.write();
             let mut ws = watch.write();
             let mut ps = pkg.write();
             let prt_arc = pkg_rt.read().clone();
             let mut prt = prt_arc.lock().unwrap();
+            let mut sh = share.write();
             let mut msg = message.write();
             let mut ap = allow_pre.write();
             let outcome = actions::handle_key(
@@ -269,6 +347,7 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 rt_watch,
                 &mut ps,
                 &mut prt,
+                &mut sh,
                 &dir,
                 dry_run,
                 demo,
@@ -297,10 +376,22 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         match tab_val {
             Tab::Keyboard => vec![element!(DevicePage(..DevicePageProps { state: keys })).into()],
             Tab::Watch => vec![element!(DevicePage(..DevicePageProps { state: watch })).into()],
-            Tab::Packages => vec![element!(PackagesPage(..PackagesPageProps {
-                state: pkg,
-                allow_pre: allow_pre.get(),
-            })).into()],
+            Tab::Packages => vec![
+                element!(PackagesPage(
+                    ..PackagesPageProps {
+                        state: pkg,
+                        allow_pre: allow_pre.get(),
+                    }
+                ))
+                .into(),
+            ],
+            Tab::Share => {
+                #[cfg(unix)]
+                let el = share_page_element(share);
+                #[cfg(windows)]
+                let el = share_page_element();
+                vec![el]
+            }
         }
     };
     // 新用户询问框:盖在页区上方(与包菜单弹窗同款布局)。
@@ -321,6 +412,17 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let page_border = ratatui_kit::components::BorderProps {
         borders: Borders::ALL,
         border_style: Some(Style::new().dark_gray()),
+        // Share 页的内容框左上角标 launch 走哪条路:herdr 已装 = herdr
+        // (插件 share,不开新终端);否则 = 检测到的终端(open_terminal 目标,
+        // 检测不出就是 unknown)。installed 在进 tab 时同步检测,读前已就绪。
+        top_title: (tab_val == Tab::Share).then(|| {
+            let name = if share.read().installed {
+                "herdr"
+            } else {
+                crate::terminal::active_name()
+            };
+            Line::from(Span::styled(format!(" {name} "), Style::new().dark_gray()))
+        }),
         children: page_children,
         ..Default::default()
     };
@@ -362,16 +464,18 @@ pub fn App(props: &AppProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 }
 
 fn tab_line(tab: Tab) -> Line<'static> {
-    let spans: Vec<Span> = [Tab::Packages, Tab::Keyboard, Tab::Watch]
+    let spans: Vec<Span> = [Tab::Packages, Tab::Share, Tab::Keyboard, Tab::Watch]
         .iter()
         .map(|t| {
             let n = match t {
                 Tab::Packages => 1,
-                Tab::Keyboard => 2,
-                Tab::Watch => 3,
+                Tab::Share => 2,
+                Tab::Keyboard => 3,
+                Tab::Watch => 4,
             };
             let name = match t {
                 Tab::Packages => "Packages",
+                Tab::Share => "Share",
                 Tab::Keyboard => "Keyboard",
                 Tab::Watch => "Watch",
             };
@@ -461,7 +565,8 @@ pub fn DevicePageInner(props: &DevicePageInnerProps) -> impl Into<AnyElement<'st
     let w = RowsWidget { lines, sel_line };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(w)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -482,7 +587,12 @@ mod rows_widget_tests {
 
     fn render_lines(count: usize, sel_line: usize, height: u16) -> Vec<String> {
         let lines: Vec<Line> = (0..count).map(|i| Line::from(format!("row {i}"))).collect();
-        let area = Rect { x: 0, y: 0, width: 20, height };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height,
+        };
         let mut buf = ratatui_kit::ratatui::buffer::Buffer::empty(area);
         RowsWidget { lines, sel_line }.render(area, &mut buf);
         (0..height)
@@ -528,7 +638,7 @@ impl ratatui_kit::ratatui::widgets::Widget for RowsWidget {
 
         let height = area.height as usize;
         // 无状态滚动:只保证选中行可见。选中行在窗口内则贴顶,否则贴底。
-        let offset = if self.sel_line + 1 <= height || height == 0 {
+        let offset = if self.sel_line < height || height == 0 {
             0
         } else {
             self.sel_line + 1 - height
@@ -587,7 +697,7 @@ fn row_line(
 fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
     let frame = SPINNER[st.spin % SPINNER.len()];
     let (title, mut lines, alert, content_w): (String, Vec<Line>, bool, usize) = match &st.conn {
-        Conn::Ready => return element!(Fragment { }).into(),
+        Conn::Ready => return element!(Fragment {}).into(),
         Conn::Fresh => (
             " scan ".into(),
             vec![
@@ -642,13 +752,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
                 " Found {} device(s) — pick one to configure:",
                 st.pick.len()
             ))];
-            let w = st
-                .pick
-                .iter()
-                .map(|d| d.name.len())
-                .max()
-                .unwrap_or(10)
-                + 34;
+            let w = st.pick.iter().map(|d| d.name.len()).max().unwrap_or(10) + 34;
             for (i, d) in st.pick.iter().enumerate() {
                 lines.push(option_line(d.name.clone(), i == st.pick_sel));
             }
@@ -690,12 +794,7 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
             30,
         ),
     };
-    if st.demo
-        && matches!(
-            st.conn,
-            Conn::Scanning | Conn::Pick | Conn::Connecting(_)
-        )
-    {
+    if st.demo && matches!(st.conn, Conn::Scanning | Conn::Pick | Conn::Connecting(_)) {
         lines.push(Line::from(Span::styled(" (demo fake devices)", dim())));
     }
     let title_ref: &str = &title;
@@ -705,7 +804,12 @@ fn conn_flow(st: &DeviceState) -> AnyElement<'static> {
 // ===== 公共渲染小件 =====
 
 /// 居中模态框:四边边框 + 标题,宽度按内容预估,红框告警态。
-fn modal(title: &str, lines: Vec<Line<'static>>, alert: bool, content_w: usize) -> AnyElement<'static> {
+fn modal(
+    title: &str,
+    lines: Vec<Line<'static>>,
+    alert: bool,
+    content_w: usize,
+) -> AnyElement<'static> {
     let h = lines.len() as u16 + 2;
     let w = (content_w as u16 + 4).clamp(22, 120);
     let border_style = if alert { err_style() } else { Style::new() };
@@ -749,24 +853,44 @@ pub struct PackagesPageProps {
 #[component]
 pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>> {
     let st = props.state.read().clone();
+    // 按终端宽度分列:package/installed/latest/pre 固定,status 吃剩余宽度
+    // (窗口拉宽它就跟着变宽)。行与表头都用 fit()(显示宽截断/补齐),
+    // CJK 与长文本不会顶歪后列。
+    let term_w = ratatui_kit::crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(120);
+    let w_pkg = 11usize;
+    let w_inst = 15usize;
+    let w_latest = 12usize;
+    let w_pre = 13usize;
+    let w_status = term_w
+        .saturating_sub(4)
+        .saturating_sub(w_pkg + w_inst + w_latest + w_pre + 3)
+        .max(10);
     let header = Line::from(vec![
-        Span::styled(format!("{:<12}", "package"), Style::new().bold()),
-        Span::styled(format!("{:<8}", "inst"), Style::new().bold()),
-        Span::styled(format!("{:<10}", "latest"), Style::new().bold()),
-        Span::styled(format!("{:<12}", "pre"), Style::new().bold()),
-        Span::styled("status", Style::new().bold()),
+        Span::styled(fit("package", w_pkg), Style::new().bold()),
+        Span::styled(fit("installed", w_inst), Style::new().bold()),
+        Span::styled(fit("latest", w_latest), Style::new().bold()),
+        Span::styled(fit("pre", w_pre), Style::new().bold()),
+        Span::styled(fit("status", w_status), Style::new().bold()),
     ]);
     let mut lines: Vec<Line<'static>> = vec![header, Line::from("")];
     for (i, e) in st.entries.iter().enumerate() {
-        let installed = e.installed.clone().unwrap_or_else(|| "not installed".into());
+        let installed = e
+            .installed
+            .clone()
+            .unwrap_or_else(|| "not installed".into());
         let status = e.status(props.allow_pre);
         let selected = i == st.sel;
         let line = Line::from(vec![
-            Span::raw(format!("{:<12}", e.pkg.name)),
-            Span::raw(format!("{:<8}", short(installed.as_str()))),
-            Span::raw(format!("{:<10}", e.latest.clone().unwrap_or_else(|| "?".into()))),
-            Span::raw(format!("{:<12}", e.any.clone().unwrap_or_else(|| "-".into()))),
-            Span::raw(short(status).to_string()),
+            Span::raw(fit(e.pkg.name, w_pkg)),
+            Span::raw(fit(&installed, w_inst)),
+            Span::raw(fit(
+                &e.latest.clone().unwrap_or_else(|| "?".into()),
+                w_latest,
+            )),
+            Span::raw(fit(&e.any.clone().unwrap_or_else(|| "-".into()), w_pre)),
+            Span::raw(fit(status, w_status)),
         ]);
         lines.push(if selected {
             line.style(Style::new().bg(Color::DarkGray))
@@ -781,9 +905,7 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
         for (i, (cli, _, label)) in ask.clis.iter().enumerate() {
             let check = if ask.checked[i] { "[x]" } else { "[ ]" };
             let sel = if i == ask.sel { "❯" } else { " " };
-            ask_lines.push(Line::from(format!(
-                " {sel} {check} {label} plugin ({cli})"
-            )));
+            ask_lines.push(Line::from(format!(" {sel} {check} {label} plugin ({cli})")));
         }
         ask_lines.push(Line::from(""));
         ask_lines.push(Line::from(Span::styled(
@@ -795,7 +917,8 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesMenuModal(title: String::from(" agent plugins "), lines: ask_lines)
-        }).into()
+        })
+        .into()
     } else if let Some(m) = &st.menu {
         let e = st.entries.get(m.pkg);
         let (latest, any, title) = match e {
@@ -831,14 +954,20 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesMenuModal(title: title, lines: menu_lines)
-        }).into()
+        })
+        .into()
     } else if st.running {
         let frame = SPINNER[st.spin % SPINNER.len()];
         let mb = |b: u64| format!("{:.1} MB", b as f64 / 1024.0 / 1024.0);
         let progress_line = match st.progress {
             Some((done, Some(total))) => {
                 let pct = done.checked_mul(100).map_or(0, |n| n / total.max(1));
-                format!(" {frame} {}…  {} / {} ({pct}%)", st.job_label, mb(done), mb(total))
+                format!(
+                    " {frame} {}…  {} / {} ({pct}%)",
+                    st.job_label,
+                    mb(done),
+                    mb(total)
+                )
             }
             Some((done, None)) => {
                 format!(" {frame} {}…  {} downloaded", st.job_label, mb(done))
@@ -850,13 +979,17 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
                 Text(text: Line::from(""))
             }
             PackagesWorkingModal(line: progress_line)
-        }).into()
+        })
+        .into()
     } else {
         let mut children: Vec<AnyElement<'static>> = Vec::new();
         for line in lines {
-            children.push(element!(View(height: Constraint::Length(1)) {
-                Text(text: line)
-            }).into());
+            children.push(
+                element!(View(height: Constraint::Length(1)) {
+                    Text(text: line)
+                })
+                .into(),
+            );
         }
         let vp = ratatui_kit::components::ViewProps {
             flex_direction: Direction::Vertical,
@@ -874,8 +1007,263 @@ pub fn PackagesPage(props: &PackagesPageProps) -> impl Into<AnyElement<'static>>
     el
 }
 
-fn short(s: &str) -> &str {
-    super::state::short_status(s)
+// ===== Share 页 =====
+
+/// 居中弹窗:「没有 herdr」时起独立 vibetty 会话的出口。
+/// 自绘 Widget(手动居中 + ratatui 原生渲染),与 keymap 弹窗同一套路。
+/// `warp` = 当前终端是 Warp:没有「程序化开窗跑命令」的公开接口,
+/// 弹窗改为说明文案(装 herdr 或自己在 Warp 里跑 vibetty)。
+#[derive(Clone)]
+struct VibettyLaunchWidget {
+    warp: bool,
+}
+
+impl ratatui_kit::ratatui::widgets::Widget for VibettyLaunchWidget {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
+        use ratatui_kit::ratatui::{
+            layout::Rect,
+            text::Line,
+            widgets::{Clear, Paragraph},
+        };
+
+        let lines: [ratatui_kit::ratatui::text::Line; 3] = if self.warp {
+            [
+                Line::from(Span::styled(
+                    " Warp doesn't support auto-opening a terminal yet.",
+                    Style::new().bold(),
+                )),
+                Line::from(Span::styled(
+                    " Install herdr to manage sessions, or start",
+                    Style::new().dark_gray(),
+                )),
+                Line::from(Span::styled(
+                    " vibetty yourself in Warp:  $ vibetty",
+                    Style::new().dark_gray(),
+                )),
+            ]
+        } else {
+            [
+                Line::from(Span::styled(
+                    " Start a standalone vibetty session:",
+                    Style::new().bold(),
+                )),
+                Line::from(Span::styled(
+                    " ❯ Launch vibetty in a new terminal  ($ vibetty)",
+                    Style::new().light_blue().bold(),
+                )),
+                Line::from(""),
+            ]
+        };
+        // 宽度按最长行内容算(+ 边框 2),不写死:写窄了末行会被截断。
+        let content_w = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>() as u16
+            })
+            .max()
+            .unwrap_or(20);
+        let w = (content_w + 2).min(area.width.saturating_sub(2));
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+
+        Clear.render(rect, buf);
+        let block = ratatui_kit::ratatui::widgets::Block::bordered()
+            .title(Span::styled(" vibetty ", Style::new().bold()));
+        let inner = block.inner(rect);
+        block.render(rect, buf);
+        for (i, line) in lines.iter().enumerate() {
+            let row = Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            };
+            Paragraph::new(line.clone()).render(row, buf);
+        }
+    }
+}
+
+fn vibetty_launch_popup(warp: bool) -> AnyElement<'static> {
+    let el: AnyElement<'static> = element!(Center {
+        widget(VibettyLaunchWidget { warp })
+    })
+    .into();
+    el
+}
+
+/// agent 列表页(unix 专属;windows 的 Share 页只有 vibetty 弹窗)。
+#[cfg(unix)]
+#[derive(Props)]
+pub struct SharePageProps {
+    pub state: State<super::state::ShareState>,
+}
+
+/// 截断到 n 个字符(超长加 …)。
+/// 字符串的显示宽度(CJK 算 2 列)。
+fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    s.width()
+}
+
+/// 截断/补齐到指定显示宽度:超长按显示宽截断并加 …,不足补空格。
+/// 与 `{:<n$}` 不同,这里对 CJK 也是对齐的(按显示宽,不是字符数)。
+fn fit(s: &str, w: usize) -> String {
+    let width = display_width(s);
+    if width <= w {
+        return format!("{}{}", s, " ".repeat(w - width));
+    }
+    if w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthStr::width(ch.to_string().as_str());
+        if used + cw > w.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// agent 状态的展示色(unix 专属;windows 没有列表页)。
+#[cfg(unix)]
+fn state_style(state: &str) -> Style {
+    match state {
+        "working" => Style::new().light_yellow(),
+        "waiting" => Style::new().yellow(),
+        "error" => Style::new().red(),
+        "done" => Style::new().green(),
+        "idle" => Style::new().dark_gray(),
+        _ => Style::new(),
+    }
+}
+
+/// herdr 里的 agent 列表:title / session / agent / state 四列,
+/// 进 tab 时已在 switch_to 里同步扫描。
+/// Share 页入口:windows 直接渲染「独立 vibetty 会话」弹窗;unix 走 herdr 页。
+pub fn share_page_element(
+    // windows 不用 share(没有 herdr 列表),参数直接 cfg 掉。
+    #[cfg(unix)] share: ratatui_kit::prelude::State<super::state::ShareState>,
+) -> AnyElement<'static> {
+    #[cfg(windows)]
+    let el: AnyElement<'static> = vibetty_launch_popup(crate::terminal::active_name() == "warp");
+    #[cfg(unix)]
+    let el: AnyElement<'static> = {
+        let props = SharePageProps { state: share };
+        element!(SharePage(..props)).into()
+    };
+    el
+}
+
+#[cfg(unix)]
+#[component]
+pub fn SharePage(props: &SharePageProps) -> impl Into<AnyElement<'static>> {
+    let st = props.state.read().clone();
+    if st.checked && !st.installed {
+        // 没有 herdr 不劝安装:直接给一个居中的「起独立 vibetty 会话」弹窗
+        // (Warp 终端则显示说明文案,见 VibettyLaunchWidget)。
+        return vibetty_launch_popup(crate::terminal::active_name() == "warp");
+    }
+    let lines: Vec<Line<'static>> = if !st.checked {
+        vec![Line::from(" checking herdr…")]
+    } else if let Some(e) = &st.err {
+        vec![Line::from(Span::styled(
+            format!(" {e}"),
+            Style::new().red(),
+        ))]
+    } else if !st.plugin {
+        // herdr 在,但 vibetty 没注册成 plugin:share 动作开不了 pane,给出安装命令。
+        vec![
+            Line::from(" vibetty is not installed as a herdr plugin."),
+            Line::from(Span::styled(" install it with:", Style::new().dark_gray())),
+            Line::from(Span::styled(
+                "   $ herdr plugin install second-state/vibetty",
+                Style::new().light_blue(),
+            )),
+        ]
+    } else if st.rows.is_empty() {
+        vec![Line::from(Span::styled(
+            " no herdr agents running",
+            Style::new().dark_gray(),
+        ))]
+    } else {
+        // 按终端宽度分列:session/agent/state/share 固定,title 吃剩余宽度的
+        // 大头。行与表头都用 fit()(显示宽截断/补齐),CJK 长标题不会顶歪后列。
+        let term_w = ratatui_kit::crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(120);
+        let w_session = 9usize;
+        let w_agent = 7usize;
+        let w_state = 9usize;
+        let w_share = 8usize;
+        let w_title = term_w
+            .saturating_sub(4)
+            .saturating_sub(w_session + w_agent + w_state + w_share + 3)
+            .max(16);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(fit("title", w_title), Style::new().bold()),
+            Span::styled(fit("session", w_session), Style::new().bold()),
+            Span::styled(fit("agent", w_agent), Style::new().bold()),
+            Span::styled(fit("state", w_state), Style::new().bold()),
+            Span::styled("share", Style::new().bold()),
+        ])];
+        for (i, r) in st.rows.iter().enumerate() {
+            let shared = st
+                .shared
+                .iter()
+                .find(|s| s.target == r.pane_id)
+                .map(|s| s.pane_id.clone());
+            let share_span = match &shared {
+                Some(id) => Span::styled(id.clone(), Style::new().green()),
+                None => Span::styled("-", Style::new().dark_gray()),
+            };
+            let line = Line::from(vec![
+                Span::raw(fit(&r.title, w_title)),
+                Span::raw(fit(&r.session, w_session)),
+                Span::raw(fit(&r.agent, w_agent)),
+                Span::styled(fit(&r.state, w_state), state_style(&r.state)),
+                share_span,
+            ]);
+            lines.push(if i == st.sel {
+                line.style(Style::new().bg(Color::DarkGray))
+            } else {
+                line
+            });
+        }
+        lines
+    };
+    let mut children: Vec<AnyElement<'static>> = Vec::new();
+    for line in lines {
+        children.push(
+            element!(View(height: Constraint::Length(1)) {
+                Text(text: line)
+            })
+            .into(),
+        );
+    }
+    let vp = ratatui_kit::components::ViewProps {
+        flex_direction: Direction::Vertical,
+        children,
+        ..Default::default()
+    };
+    let el: AnyElement<'static> = element!(View(..vp)).into();
+    el
 }
 
 /// keymap 编辑弹窗:自绘 Widget(手动居中 + ratatui 原生渲染)。
@@ -898,7 +1286,11 @@ impl ratatui_kit::ratatui::widgets::Widget for KeymapModalWidget {
 }
 
 impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
-    fn render(self, area: ratatui_kit::ratatui::layout::Rect, buf: &mut ratatui_kit::ratatui::buffer::Buffer) {
+    fn render(
+        self,
+        area: ratatui_kit::ratatui::layout::Rect,
+        buf: &mut ratatui_kit::ratatui::buffer::Buffer,
+    ) {
         use ratatui_kit::ratatui::{
             text::Line,
             widgets::{Clear, Paragraph},
@@ -926,7 +1318,11 @@ impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
             } else {
                 Span::raw(binding.clone())
             };
-            let key_style = if selected { Style::new().bold() } else { Style::new() };
+            let key_style = if selected {
+                Style::new().bold()
+            } else {
+                Style::new()
+            };
             lines.push(Line::from(vec![
                 Span::raw(format!(" {marker} ")),
                 Span::styled(format!("{key:<10}"), key_style),
@@ -941,16 +1337,29 @@ impl ratatui_kit::ratatui::widgets::Widget for &KeymapModalWidget {
         let h = (lines.len() as u16 + 2).min(area.height);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(h)) / 2;
-        let rect = ratatui_kit::ratatui::layout::Rect { x, y, width: w, height: h };
+        let rect = ratatui_kit::ratatui::layout::Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
 
         Clear.render(rect, buf);
         let block = ratatui_kit::ratatui::widgets::Block::bordered()
             .title(Span::styled(
                 " keymap ",
-                if alert { Style::new().red() } else { Style::new() }
-                    .add_modifier(Modifier::BOLD),
+                if alert {
+                    Style::new().red()
+                } else {
+                    Style::new()
+                }
+                .add_modifier(Modifier::BOLD),
             ))
-            .border_style(if alert { Style::new().red() } else { Style::new() });
+            .border_style(if alert {
+                Style::new().red()
+            } else {
+                Style::new()
+            });
         let inner = block.inner(rect);
         block.render(rect, buf);
         for (i, line) in lines.iter().enumerate() {
@@ -973,7 +1382,8 @@ fn keymap_modal(st: &DeviceState, km: &super::state::KeymapPopupState) -> AnyEle
     };
     let el: AnyElement<'static> = element!(Center {
         widget(w)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -1029,18 +1439,10 @@ pub struct PackagesMenuModalProps {
     pub lines: Vec<Line<'static>>,
 }
 
-
 #[component]
 pub fn PackagesMenuModal(props: &PackagesMenuModalProps) -> impl Into<AnyElement<'static>> {
     let h = props.lines.len() as u16 + 2;
-    let w = (props
-        .lines
-        .iter()
-        .map(|l| l.width())
-        .max()
-        .unwrap_or(20) as u16
-        + 4)
-        .clamp(22, 120);
+    let w = (props.lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 4).clamp(22, 120);
     element!(Center(width: Constraint::Length(w), height: Constraint::Length(h)) {
         Border(
             borders: Borders::ALL,

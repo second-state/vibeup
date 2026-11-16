@@ -3,19 +3,20 @@
 //! 要么丢后台线程(Job/PkgJob),要么由调用方 `tokio::spawn` + spawn_blocking。
 
 use crate::ble::{self, DeviceKind, FoundDevice, SessionEvent, Target};
-use btleplug::api::{Central as _, Manager as _, Peripheral as _};
 use crate::config_cmd;
 use crate::install;
-use crate::pkg::{self, Pkg, PKGS, SELF};
-use anyhow::{bail, Result};
+use crate::pkg::{self, PKGS, Pkg, SELF};
+use anyhow::{Result, bail};
+use btleplug::api::{Central as _, Manager as _, Peripheral as _};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::demo;
 use super::state::{
-    Conn, DeviceRuntime, DeviceState, Entry, Field, next_in_cycle, KEYMAP_KEYS, keymap_binding, PkgMenu, PkgRuntime,
-    PkgState, PopupKind, PopupState, RowAction, SharedProgress, DownloadProgress, PKG_MENU_ITEMS,
+    Conn, DeviceRuntime, DeviceState, DownloadProgress, Entry, Field, KEYMAP_KEYS, PKG_MENU_ITEMS,
+    PkgMenu, PkgRuntime, PkgState, PopupKind, PopupState, RowAction, SharedProgress,
+    keymap_binding, next_in_cycle,
 };
 
 // ===== 后台任务基建(线程 + channel)=====
@@ -205,9 +206,7 @@ fn start_plugin_install(
         move || {
             let results: Vec<String> = picks
                 .iter()
-                .map(|(cli, action, label)| {
-                    install_plugin_cli(cli, action, label)
-                })
+                .map(|(cli, action, label)| install_plugin_cli(cli, action, label))
                 .collect();
             PkgJobOut::PluginsDone(results)
         },
@@ -259,7 +258,8 @@ pub fn install_pkg(
     state.running = true;
     state.vibekeys_pending = pkg.name == "vibekeys";
     state.progress = None;
-    let progress: SharedProgress = std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
+    let progress: SharedProgress =
+        std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
     let tick_progress = progress.clone();
     let job_progress = progress.clone();
     rt.job = Some(spawn_pkg_job(job_progress, move || {
@@ -317,7 +317,8 @@ pub fn update_all(state: &mut PkgState, rt: &mut PkgRuntime, dir: &Path, dry_run
     state.job_label = "update all".into();
     state.running = true;
     state.progress = None;
-    let progress: SharedProgress = std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
+    let progress: SharedProgress =
+        std::sync::Arc::new(std::sync::Mutex::new(DownloadProgress::default()));
     let tick_progress = progress.clone();
     let job_progress = progress.clone();
     rt.job = Some(spawn_pkg_job(job_progress, move || {
@@ -365,7 +366,9 @@ pub fn poll_pkg_job(
     }
     let out = job.try_recv();
     rt.job = None;
-    rt.progress = std::sync::Arc::new(std::sync::Mutex::new(super::state::DownloadProgress::default()));
+    rt.progress = std::sync::Arc::new(std::sync::Mutex::new(
+        super::state::DownloadProgress::default(),
+    ));
     state.running = false;
     state.progress = None;
     match out {
@@ -451,8 +454,11 @@ fn start_connect(state: &mut DeviceState, rt: &mut DeviceRuntime, demo: bool, de
     state.conn = Conn::Connecting(dev.name);
     let kind = state.kind;
     match demo {
-        // demo:假任务 0.4s 后回样例配置。
-        true => rt.job = Some(demo::demo_connect_job(kind)),
+        // demo:假任务 0.4s 后回配置;第二台 = 未配置设备(bare)。
+        true => {
+            let bare = state.pick.iter().position(|d| d.id == dev.id) == Some(1);
+            rt.job = Some(demo::demo_connect_job(kind, bare));
+        }
         // 真机:常驻会话,Ready/Disconnected 事件驱动。
         false => rt.session = Some(ble::Session::open(target)),
     }
@@ -509,6 +515,11 @@ fn on_connect_result(
 ) -> String {
     match res {
         Ok(cfg) => {
+            // demo:runtime 的假配置跟着连接走(否则移交/归还用的还是
+            // 挂载时的 sample,与设备页显示的配置脱节)。
+            if state.demo {
+                rt.mock = cfg.clone();
+            }
             state.config = Some(cfg);
             state.connected_name = Some(
                 state
@@ -524,6 +535,7 @@ fn on_connect_result(
         Err(e) => {
             let msg = format!("{e:#}");
             state.conn = Conn::Failed(msg.clone());
+            state.auto_wizard_done = false;
             msg
         }
     }
@@ -535,15 +547,12 @@ pub fn poll_session(state: &mut DeviceState, rt: &mut DeviceRuntime) -> Option<S
     Some(on_session_event(state, rt, ev))
 }
 
-fn on_session_event(
-    state: &mut DeviceState,
-    rt: &mut DeviceRuntime,
-    ev: SessionEvent,
-) -> String {
+fn on_session_event(state: &mut DeviceState, rt: &mut DeviceRuntime, ev: SessionEvent) -> String {
     match ev {
         SessionEvent::Ready(res) => on_connect_result(state, rt, res),
         SessionEvent::Disconnected(e) => {
             drop(rt.session.take());
+            state.auto_wizard_done = false;
             if state.conn == Conn::Ready {
                 state.editing = None;
                 state.popup = None;
@@ -612,9 +621,7 @@ pub fn keymap_popup_key(
             KeyCode::Enter => {
                 let binding = input.buf.trim().to_string();
                 if binding.is_empty() {
-                    return Some(
-                        "binding must not be empty — type one or Esc to cancel".into(),
-                    );
+                    return Some("binding must not be empty — type one or Esc to cancel".into());
                 }
                 let keyname = KEYMAP_KEYS[*idx];
                 let res = do_keymap(demo, rt, keyname, &binding);
@@ -631,44 +638,50 @@ pub fn keymap_popup_key(
             }
             KeyCode::Backspace => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.backspace();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.backspace();
+                }
                 return None;
             }
             KeyCode::Delete => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.delete();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.delete();
+                }
                 return None;
             }
             KeyCode::Left => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.left();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.left();
+                }
                 return None;
             }
             KeyCode::Right => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.right();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.right();
+                }
                 return None;
             }
             KeyCode::Home => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.home();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.home();
+                }
                 return None;
             }
             KeyCode::End => {
                 if let Some(km) = state.keymap_popup.as_mut()
-                    && let Some((_, input)) = km.editing.as_mut() {
-                        input.end();
-                    }
+                    && let Some((_, input)) = km.editing.as_mut()
+                {
+                    input.end();
+                }
                 return None;
             }
             KeyCode::Char(c) => {
@@ -747,10 +760,14 @@ pub fn keymap_popup_key(
 }
 
 /// 动作成功后的善后:重读配置,失败顶 footer。
-fn after_action(demo: bool, state: &mut DeviceState, rt: &mut DeviceRuntime, ok: bool, message: &mut String) {
-    if ok
-        && let Some(err) = load_config(demo, state, rt)
-    {
+fn after_action(
+    demo: bool,
+    state: &mut DeviceState,
+    rt: &mut DeviceRuntime,
+    ok: bool,
+    message: &mut String,
+) {
+    if ok && let Some(err) = load_config(demo, state, rt) {
         *message = format!("read failed: {err}");
     }
 }
@@ -800,11 +817,13 @@ pub fn do_field(
     };
     match field {
         Field::ServerUrl => {
+            // 归一化:裸 host:port 自动补 mqtt://(固件要求带 scheme)。
+            let url = config_cmd::normalize_broker_url(val)?;
             if demo {
-                rt.mock["server_url"] = val.into();
+                rt.mock["server_url"] = url.into();
                 return Ok(());
             }
-            write(rt, "server_url", val.into())
+            write(rt, "server_url", url.into())
         }
         Field::AsrUri => {
             if demo {
@@ -867,12 +886,7 @@ pub fn do_field(
 }
 
 /// WiFi 增改(同 ssid = 更新密码):demo 落假配置,真机读-改-写整个列表。
-pub fn do_wifi_add(
-    demo: bool,
-    rt: &mut DeviceRuntime,
-    ssid: &str,
-    pass: &str,
-) -> Result<()> {
+pub fn do_wifi_add(demo: bool, rt: &mut DeviceRuntime, ssid: &str, pass: &str) -> Result<()> {
     if ssid.trim().is_empty() {
         bail!("ssid must not be empty");
     }
@@ -969,6 +983,7 @@ pub fn handle_key(
     watch_rt: &mut DeviceRuntime,
     pkg: &mut PkgState,
     pkg_rt: &mut PkgRuntime,
+    share: &mut super::state::ShareState,
     dir: &Path,
     dry_run: bool,
     demo: bool,
@@ -993,6 +1008,49 @@ pub fn handle_key(
 
     let mut message = String::new();
 
+    // ---- Share 页 ----
+    if tab.get() == super::state::Tab::Share {
+        match code {
+            KeyCode::Char('1') => {
+                switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
+            }
+            KeyCode::Char('2') => {
+                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
+            }
+            KeyCode::Char('3') => {
+                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
+            }
+            KeyCode::Char('4') => {
+                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
+            }
+            KeyCode::Tab => {
+                let next = tab.get().next();
+                switch_to(&mut tab, next, keys, watch, share);
+                return KeyOutcome::msg(tab_message(next, share));
+            }
+            KeyCode::Esc => {
+                return KeyOutcome {
+                    message: None,
+                    exit: true,
+                };
+            }
+            _ => {}
+        }
+        // 平台各自的 Share 页按键(unix = herdr 集成;windows = 仅独立 vibetty)。
+        #[cfg(unix)]
+        let msg_opt = share_keys_unix(share, &key);
+        #[cfg(windows)]
+        let msg_opt = share_keys_windows(share, &key);
+        if let Some(m) = msg_opt {
+            message = m;
+        }
+        return KeyOutcome::msg(std::mem::take(&mut message));
+    }
+
     // ---- 设备页 ----
     if tab.get() != super::state::Tab::Packages {
         let (state, rt): (&mut DeviceState, &mut DeviceRuntime) =
@@ -1004,7 +1062,7 @@ pub fn handle_key(
         // pop 框独占按键(Tab 仍可切标签)。
         if state.popup.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1016,7 +1074,7 @@ pub fn handle_key(
         // keymap 弹窗独占按键(Tab 仍可切标签)。
         if state.keymap_popup.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1028,7 +1086,7 @@ pub fn handle_key(
         // 行内编辑独占按键(Tab 仍可切标签)。
         if state.editing.is_some() {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let state_demo = state.demo;
@@ -1040,7 +1098,7 @@ pub fn handle_key(
         // 连接流程(未就绪)独占按键;Tab 切标签保持可用。
         if state.conn != Conn::Ready {
             if code == KeyCode::Tab {
-                switch_tab(&mut tab, keys, watch, &mut message);
+                switch_tab(&mut tab, keys, watch, share, &mut message);
                 return KeyOutcome::msg(std::mem::take(&mut message));
             }
             let demo = state.demo;
@@ -1064,21 +1122,25 @@ pub fn handle_key(
         // 就绪页:切标签键优先(与旧版全局键一致),然后行导航/动作。
         match code {
             KeyCode::Char('1') => {
-                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+                switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
             }
             KeyCode::Char('2') => {
-                switch_to(&mut tab, super::state::Tab::Watch, keys, watch);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+                switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
             }
             KeyCode::Char('3') => {
-                switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
-                return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+                switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
+            }
+            KeyCode::Char('4') => {
+                switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
+                return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
             }
             KeyCode::Tab => {
                 let next = tab.get().next();
-                switch_to(&mut tab, next, keys, watch);
-                return KeyOutcome::msg(tab_message(next));
+                switch_to(&mut tab, next, keys, watch, share);
+                return KeyOutcome::msg(tab_message(next, share));
             }
             // 这里已无弹窗/编辑可关闭,Esc = 退出应用。
             KeyCode::Esc => {
@@ -1191,21 +1253,25 @@ pub fn handle_key(
             };
         }
         KeyCode::Char('1') => {
-            switch_to(&mut tab, super::state::Tab::Packages, keys, watch);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Packages));
+            switch_to(&mut tab, super::state::Tab::Packages, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Packages, share));
         }
         KeyCode::Char('2') => {
-            switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard));
+            switch_to(&mut tab, super::state::Tab::Share, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Share, share));
         }
         KeyCode::Char('3') => {
-            switch_to(&mut tab, super::state::Tab::Watch, keys, watch);
-            return KeyOutcome::msg(tab_message(super::state::Tab::Watch));
+            switch_to(&mut tab, super::state::Tab::Keyboard, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Keyboard, share));
+        }
+        KeyCode::Char('4') => {
+            switch_to(&mut tab, super::state::Tab::Watch, keys, watch, share);
+            return KeyOutcome::msg(tab_message(super::state::Tab::Watch, share));
         }
         KeyCode::Tab => {
             let next = tab.get().next();
-            switch_to(&mut tab, next, keys, watch);
-            return KeyOutcome::msg(tab_message(next));
+            switch_to(&mut tab, next, keys, watch, share);
+            return KeyOutcome::msg(tab_message(next, share));
         }
         KeyCode::Char('j') | KeyCode::Down => {
             pkg.sel = (pkg.sel + 1).min(pkg.entries.len().saturating_sub(1));
@@ -1252,17 +1318,22 @@ pub fn handle_key(
     KeyOutcome::msg(std::mem::take(&mut pkg.message))
 }
 
-fn tab_message(t: super::state::Tab) -> String {
+fn tab_message(t: super::state::Tab, share: &super::state::ShareState) -> String {
     match t {
         super::state::Tab::Keyboard => {
             "vibekeys — Enter run/edit · r re-read config · Esc quit".into()
         }
-        super::state::Tab::Watch => {
-            "watch — Enter run/edit · r re-read config · Esc quit".into()
-        }
+        super::state::Tab::Watch => "watch — Enter run/edit · r re-read config · Esc quit".into(),
         super::state::Tab::Packages => {
             "packages — Enter actions · u update · U all · p prerelease · w wizard · Esc quit"
                 .into()
+        }
+        // autoshare daemon 在跑:agent 自动 share,footer 宣传 a 停止而不是手动 toggle。
+        super::state::Tab::Share if share.autoshare_running() => {
+            "share — autoshare on · a stop · r refresh · Esc quit".into()
+        }
+        super::state::Tab::Share => {
+            "share — Enter toggle · a autoshare · r refresh · Esc quit".into()
         }
     }
 }
@@ -1271,11 +1342,184 @@ fn switch_tab(
     tab: &mut ratatui_kit::State<super::state::Tab>,
     keys: &mut DeviceState,
     watch: &mut DeviceState,
+    share: &mut super::state::ShareState,
     message: &mut String,
 ) {
     let next = tab.get().next();
-    switch_to(tab, next, keys, watch);
-    *message = tab_message(next);
+    switch_to(tab, next, keys, watch, share);
+    *message = tab_message(next, share);
+}
+
+/// 进 Share 页:检测 herdr 并同步扫描 agent 列表(几次进程调用,毫秒级)。
+/// 环境变量 `DEMO` 可模拟不同样式:`herdr_uninstall`(herdr 没装)、
+/// `herdr_no_vibetty_plugin`(herdr 在但没装 vibetty plugin)。
+/// Share 页重扫:unix = 检测 herdr + 拉 agent 列表;windows = 无 herdr,
+/// 恒走「独立 vibetty 会话」。
+#[cfg(unix)]
+fn share_rescan(share: &mut super::state::ShareState) {
+    share.checked = true;
+    share.sel = 0;
+    share.err = None;
+    share.shared.clear();
+    match std::env::var("DEMO").as_deref() {
+        Ok("herdr_uninstall") => {
+            share.installed = false;
+            share.rows.clear();
+            return;
+        }
+        Ok("herdr_no_vibetty_plugin") => {
+            share.installed = true;
+            share.plugin = false;
+            share.rows.clear();
+            return;
+        }
+        _ => {}
+    }
+    if !crate::share_manager::herdr::installed() {
+        share.installed = false;
+        share.rows.clear();
+        return;
+    }
+    share.installed = true;
+    match crate::share_manager::herdr::plugin_installed() {
+        Ok(v) => share.plugin = v,
+        Err(e) => {
+            share.plugin = false;
+            share.err = Some(format!("{e:#}"));
+        }
+    }
+    match crate::share_manager::herdr::scan() {
+        Ok(rows) => share.rows = rows,
+        Err(e) => share.err = Some(format!("{e:#}")),
+    }
+    // share 状态拉取失败不挡列表(显示成没 share);d 动作会用实时 list 兜底。
+    share.shared = crate::share_manager::list().unwrap_or_default();
+    // autoshare daemon 在跑?probe 一下控制 socket(只读;残留 socket 不在这清)。
+    share.autoshare_on = crate::autoshare::socket_path()
+        .and_then(|p| crate::autoshare::control::probe(&p).ok())
+        .map(|p| p == crate::autoshare::control::Probe::Running)
+        .unwrap_or(false);
+}
+
+/// windows:没有 herdr,恒为「未安装」,页面只给独立 vibetty 出口。
+#[cfg(windows)]
+fn share_rescan(share: &mut super::state::ShareState) {
+    share.checked = true;
+    share.sel = 0;
+    share.err = None;
+    share.installed = false;
+}
+
+/// unix Share 页动作(j/k/r/s/Enter/d,完整 herdr 集成)。Some = footer 消息。
+#[cfg(unix)]
+fn share_keys_unix(share: &mut super::state::ShareState, key: &KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            share.sel = (share.sel + 1).min(share.rows.len().saturating_sub(1));
+            None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            share.sel = share.sel.saturating_sub(1);
+            None
+        }
+        KeyCode::Char('r') => {
+            share_rescan(share);
+            Some(format!("share — {} agent(s)", share.rows.len()))
+        }
+        KeyCode::Char('a') => {
+            // autoshare 开关:跑着就停(控制 socket),没跑就拉起(detached)。
+            if share.autoshare_running() {
+                match crate::autoshare::control::stop_daemon() {
+                    Ok(msg) => {
+                        share_rescan(share);
+                        Some(msg)
+                    }
+                    Err(e) => Some(format!("autoshare stop failed: {e:#}")),
+                }
+            } else {
+                match crate::autoshare::daemon::spawn_detached() {
+                    Ok(msg) => {
+                        share_rescan(share);
+                        Some(msg)
+                    }
+                    Err(e) => Some(format!("autoshare start failed: {e:#}")),
+                }
+            }
+        }
+        KeyCode::Char('s') | KeyCode::Enter | KeyCode::Char('d') => {
+            // herdr 没装:Enter = 在新终端里起一个独立 vibetty 会话
+            // (Warp 没有程序化开窗的接口,提示用户自己跑)。
+            if !share.installed {
+                if key.code == KeyCode::Char('d') {
+                    return Some("share — nothing to unshare without herdr".into());
+                }
+                if crate::terminal::active_name() == "warp" {
+                    return Some(
+                        "warp can't be auto-opened — run `vibetty` in warp, or install herdr"
+                            .into(),
+                    );
+                }
+                return match crate::terminal::open_terminal("vibetty") {
+                    Ok(()) => Some("opened a new terminal running vibetty".into()),
+                    Err(e) => Some(format!("{e:#}")),
+                };
+            }
+            if !share.plugin {
+                return Some("vibetty is not a herdr plugin — see the install hint above".into());
+            }
+            let Some(row) = share.rows.get(share.sel) else {
+                return Some("share — nothing selected".into());
+            };
+            let target = row.pane_id.clone();
+            // d = 强制取消(实时查);s/Enter = toggle(按上次扫描的缓存)。
+            let already = (key.code != KeyCode::Char('d')).then(|| {
+                share
+                    .shared
+                    .iter()
+                    .find(|s| s.target == target)
+                    .map(|s| s.pane_id.clone())
+            });
+            let already = match already {
+                Some(v) => v,
+                None => crate::share_manager::list()
+                    .ok()
+                    .and_then(|v| v.into_iter().find(|s| s.target == target))
+                    .map(|s| s.pane_id),
+            };
+            if let Some(id) = already {
+                match crate::share_manager::close(&id) {
+                    Ok(()) => {
+                        share_rescan(share);
+                        Some(format!("unshared {target}"))
+                    }
+                    Err(e) => Some(format!("unshare failed: {e:#}")),
+                }
+            } else if key.code == KeyCode::Char('d') {
+                Some(format!("{target} is not shared"))
+            } else {
+                match crate::share_manager::share(&target) {
+                    Ok(id) => {
+                        share_rescan(share);
+                        Some(format!("shared {target} → {id}"))
+                    }
+                    Err(e) => Some(format!("share failed: {e:#}")),
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// windows Share 页动作:没有 herdr,Enter/s 只起独立 vibetty 会话(仅 wt)。
+#[cfg(windows)]
+fn share_keys_windows(_share: &mut super::state::ShareState, key: &KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Char('s') | KeyCode::Enter => match crate::terminal::open_terminal("vibetty") {
+            Ok(()) => Some("opened a new terminal running vibetty".into()),
+            Err(e) => Some(format!("{e:#}")),
+        },
+        _ => None,
+    }
 }
 
 fn switch_to(
@@ -1283,12 +1527,15 @@ fn switch_to(
     next: super::state::Tab,
     keys: &mut DeviceState,
     watch: &mut DeviceState,
+    share: &mut super::state::ShareState,
 ) {
     tab.set_no_update(next);
     match next {
         super::state::Tab::Keyboard => device_enter(keys),
         super::state::Tab::Watch => device_enter(watch),
         super::state::Tab::Packages => {}
+        // 每次进 Share 页都重扫,保证列表新鲜。
+        super::state::Tab::Share => share_rescan(share),
     }
 }
 
@@ -1531,12 +1778,7 @@ fn wifi_remove_action(
     after_action(demo, state, rt, res.is_ok(), message);
 }
 
-fn row_action(
-    state: &mut DeviceState,
-    rt: &mut DeviceRuntime,
-    demo: bool,
-    message: &mut String,
-) {
+fn row_action(state: &mut DeviceState, rt: &mut DeviceRuntime, demo: bool, message: &mut String) {
     // 克隆动作,免得借用 rows 卡住后面的 &mut 方法。
     let action = state.rows[state.sel].action.clone();
     match action {
@@ -1549,7 +1791,29 @@ fn row_action(
             *message = format!("{label}: {}", describe(&res, demo));
             after_action(demo, state, rt, res.is_ok(), message);
         }
-        RowAction::Edit(_) => {
+        RowAction::Edit(field) => {
+            // wifi 已配但 server-url 为空:回车不进行行内编辑,转交向导引导
+            // (从 remote 段开始)。tick 循环读取 want_wizard 执行移交。
+            // wifi 也空的设备在连接后已经自动弹过完整引导,这里照旧行内编辑。
+            let wifi_empty = state
+                .config
+                .as_ref()
+                .and_then(|c| c.get("wifi_list"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(true);
+            if field == Field::ServerUrl
+                && !wifi_empty
+                && state
+                    .config
+                    .as_ref()
+                    .map(|c| super::state::cfg_get(c, &["server_url"]).trim().is_empty())
+                    .unwrap_or(false)
+            {
+                state.want_wizard = true;
+                *message = "opening the setup wizard…".into();
+                return;
+            }
             // 预填当前值:方便只改一部分。
             let value = state.rows[state.sel].value.clone();
             state.editing = Some((state.sel, super::state::Input::with_str(&value)));

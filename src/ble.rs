@@ -331,8 +331,19 @@ pub async fn read_char(p: &Peripheral, char_uuid: uuid::Uuid) -> Result<Vec<u8>>
 
 /// 读 KEYMAP_CONFIG_ID(键名 → 绑定对象的扁平 JSON,与写入格式一致)。
 /// 固件初值可能为空字节(开机从 NVS 刷新前),按空对象处理。
+/// 0.5.0 及以下固件该特征 WRITE-only(0.5.1 才加 READ),个别固件对读请求
+/// 可能不回包 —— 包一层超时,超时按空对象兜底,别让 read_config 永久挂起。
 pub async fn read_keymap(p: &Peripheral) -> Result<serde_json::Value> {
-    let data = read_char(p, KEYMAP_CONFIG_ID).await?;
+    let data = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        read_char(p, KEYMAP_CONFIG_ID),
+    )
+    .await
+    {
+        Ok(res) => res?,
+        // 超时不当作错误:键位读不到就当空,主配置照常返回。
+        Err(_) => return Ok(serde_json::json!({})),
+    };
     let s = String::from_utf8_lossy(&data);
     if s.trim().is_empty() {
         return Ok(serde_json::json!({}));
@@ -427,7 +438,10 @@ impl Session {
                 let _ = ev_tx.send(SessionEvent::Disconnected(e));
             }
         });
-        Self { cmd_tx, events: ev_rx }
+        Self {
+            cmd_tx,
+            events: ev_rx,
+        }
     }
 
     /// 非阻塞收一条事件。
@@ -453,7 +467,9 @@ impl Session {
         match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(res) => res,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                anyhow::bail!("device did not respond within 5s — it may be stuck or rebooting; the write may still have been applied")
+                anyhow::bail!(
+                    "device did not respond within 5s — it may be stuck or rebooting; the write may still have been applied"
+                )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("device session is closed")
@@ -567,7 +583,11 @@ async fn serve_cmd(
         SessionCmd::ConfigRead { reply } => {
             let _ = reply.send(read_config(p).await);
         }
-        SessionCmd::ConfigWrite { field, value, reply } => {
+        SessionCmd::ConfigWrite {
+            field,
+            value,
+            reply,
+        } => {
             let _ = reply.send(write_config_field(p, &field, value).await);
         }
         SessionCmd::KeymapWrite { payload, reply } => {

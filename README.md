@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/second-state/vibeup/main/install.sh
 
 or grab a prebuilt binary from the [latest release](https://github.com/second-state/vibeup/releases/latest) — `vibeup-linux-x64`, `vibeup-linux-arm64`, `vibeup-macos-arm64`, `vibeup-windows-x64.exe` (each has a companion `.sha256sum`) — and put it on your `PATH`. Already installed? `vibeup update self` upgrades vibeup itself.
 
+> **Windows note:** install.sh doesn't cover Windows yet — download `vibeup-windows-x64.exe` into `%USERPROFILE%\.cargo\bin`. If you don't have Rust installed, that directory is not on your `PATH` by default: add `%USERPROFILE%\.cargo\bin` to your user `PATH` (Settings → System → About → Advanced system settings → Environment Variables, or `setx PATH "%PATH%;%USERPROFILE%\.cargo\bin"`), then reopen the terminal.
+
 ## Usage
 
 Run `vibeup` with no subcommand (or `vibeup status`) to see what's installed vs. the latest release:
@@ -127,6 +129,19 @@ vibeup config keymap vibekeys CUSTOM delete       # CUSTOM acts as Delete
 vibeup config keymap vibekeys MIC Ctrl+X          # MIC sends Ctrl+X
 vibeup config keymap vibekeys ESC '"/compact\n"'  # ESC types /compact + Enter
 ```
+
+### Autoshare daemon (macOS / Linux)
+
+A background daemon that keeps every herdr agent pane shared to vibetty: on start it shares all current agents, subscribes to herdr's `pane.agent_detected` event, and shares new agents as they appear (share-only — closing an agent never unshares it). It also spawns `vibetty broker` (best-effort: if the port is taken or `~/.vibetty/config.toml` has no `[mqtt]` section, the daemon keeps running without it).
+
+```sh
+vibeup autoshare -d      # start detached (logs to ~/.vibetty/logs/vibeup-autoshare.log)
+vibeup autoshare         # run in the foreground (logs to stderr)
+vibeup autoshare status  # JSON: shared targets, broker state, herdr connection, uptime
+vibeup autoshare stop    # stop the daemon (kills its `vibetty broker` child too)
+```
+
+Liveness and control go through a unix socket file at `~/.vibetty/autoshare.sock` — no HTTP. A leftover socket after a `kill -9` is detected and cleaned up on the next start. Requires herdr with the vibetty plugin installed; refuses to start otherwise. Not available on Windows.
 
 ### TUI
 

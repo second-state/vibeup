@@ -1,7 +1,7 @@
 //! demo 模式:内存假配置 + 假设备广播名,扫描/连接用假任务走完整个流程,
 //! 不碰蓝牙。动作(`do_field` / `do_wifi_*` / …)直接落在假配置上。
 
-use super::actions::{spawn_job, Job, JobOut};
+use super::actions::{Job, JobOut, spawn_job};
 use crate::ble::DeviceKind;
 use crate::config_cmd;
 
@@ -92,12 +92,33 @@ pub(super) fn demo_scan_job(kind: DeviceKind) -> Job {
     })
 }
 
-/// demo 连接:假装连了 0.4s,回样例配置。
-pub(super) fn demo_connect_job(kind: DeviceKind) -> Job {
+/// demo 连接:假装连了 0.4s,回样例配置;`bare` = 扫描列表里的第二台
+/// (未配置设备:无 asr、server_url 为空),用来演示/模拟连接后自动进
+/// 向导补配置的触发。
+pub(super) fn demo_connect_job(kind: DeviceKind, bare: bool) -> Job {
     spawn_job(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        JobOut::Config(Ok(sample_config(kind)))
+        JobOut::Config(Ok(if bare {
+            bare_config(kind)
+        } else {
+            sample_config(kind)
+        }))
     })
+}
+
+/// 未配置设备的 bare 假配置:无 asr、server_url 置空、wifi_list 空
+/// (触发完整引导链:WifiAsk → 输入法 → vibekeys → remote)。
+pub(super) fn bare_config(kind: DeviceKind) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "wifi_list": [],
+        "server_url": "",
+    });
+    if kind == DeviceKind::VibeKeys {
+        v["mic_model"] = serde_json::json!(0);
+        // false:补配会话若误写 prefer_builtin_asr,设备页会显示 on 而非 off。
+        v["prefer_builtin_asr"] = serde_json::json!(false);
+    }
+    v
 }
 
 #[cfg(test)]

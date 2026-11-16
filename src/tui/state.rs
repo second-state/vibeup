@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 
 // ===== 应用 =====
 
-/// 三个标签:键盘 / 手表(BLE 设备配置)+ 管理(vibetty / vibekeys 安装更新)。
+/// 四个标签:管理(vibetty / vibekeys 安装更新)+ share(herdr 里的会话)
+/// + 键盘 / 手表(BLE 设备配置)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Tab {
     #[default]
     Packages,
+    Share,
     Keyboard,
     Watch,
 }
@@ -24,7 +26,8 @@ pub enum Tab {
 impl Tab {
     pub fn next(self) -> Self {
         match self {
-            Self::Packages => Self::Keyboard,
+            Self::Packages => Self::Share,
+            Self::Share => Self::Keyboard,
             Self::Keyboard => Self::Watch,
             Self::Watch => Self::Packages,
         }
@@ -173,7 +176,7 @@ impl PopupKind {
     /// (标题, 字段名列表)。
     pub fn spec(&self) -> (&'static str, &'static [&'static str]) {
         match self {
-            Self::WifiAdd => (" add wifi ", &["ssid", "pass"]),
+            Self::WifiAdd => (" add wifi (2.4G) ", &["ssid", "pass"]),
             Self::WifiPass { .. } => (" wifi: change password ", &["pass"]),
         }
     }
@@ -545,14 +548,6 @@ pub fn fetch_entries(entries: &mut [Entry], dir: &Path) {
 }
 
 /// 窄屏下的紧凑文案。
-pub fn short_status(s: &str) -> &str {
-    match s {
-        "update available" => "update",
-        "not installed" => "-",
-        other => other,
-    }
-}
-
 /// 按词折行(空格分词),长句适配固定框宽;超长单词硬放一行。
 pub fn wrap_words(s: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -585,11 +580,8 @@ pub struct PkgMenu {
 }
 
 /// 菜单选项文案(下标即执行分支)。
-pub const PKG_MENU_ITEMS: [&str; 3] = [
-    "Install / update latest",
-    "Install prerelease",
-    "Uninstall",
-];
+pub const PKG_MENU_ITEMS: [&str; 3] =
+    ["Install / update latest", "Install prerelease", "Uninstall"];
 
 /// 下载进度快照(后台线程写,UI 每 100ms 读一次)。
 #[derive(Clone, Copy, Default)]
@@ -629,6 +621,45 @@ pub struct PkgState {
     pub plugin_ask: Option<PluginAsk>,
 }
 
+// ===== Share 页状态 =====
+
+/// Share 页渲染状态:herdr 里的 agent 列表(进入 tab 时同步扫描)。
+#[derive(Clone, Default)]
+pub struct ShareState {
+    /// 进 tab 时做过一次检测。
+    pub checked: bool,
+    /// herdr 已安装(unix);windows 恒为 false(Share 页只走独立 vibetty)。
+    pub installed: bool,
+    /// vibetty 是否已注册为 herdr plugin(没有就 share 不了,页面给出安装命令)。
+    #[cfg(unix)]
+    pub plugin: bool,
+    /// herdr 在但查询失败(每个 session 的错误合并)。
+    pub err: Option<String>,
+    /// agent 行(跨所有 running session)。
+    #[cfg(unix)]
+    pub rows: Vec<crate::share_manager::herdr::AgentRow>,
+    /// 当前 vibetty share 会话(重扫时同步拉;列表展示用)。
+    #[cfg(unix)]
+    pub shared: Vec<crate::share_manager::Session>,
+    /// autoshare daemon 在跑(`vibeup autoshare -d`;重扫时 probe 控制 socket)。
+    #[cfg(unix)]
+    pub autoshare_on: bool,
+    pub sel: usize,
+}
+
+impl ShareState {
+    /// autoshare daemon 是否在跑(windows 恒 false;footer 文案用)。
+    #[cfg(unix)]
+    pub fn autoshare_running(&self) -> bool {
+        self.autoshare_on
+    }
+
+    #[cfg(windows)]
+    pub fn autoshare_running(&self) -> bool {
+        false
+    }
+}
+
 // ===== 设备页整体状态 =====
 
 /// 设备页渲染状态(每帧读;后台句柄在 [`DeviceRuntime`])。
@@ -652,8 +683,12 @@ pub struct DeviceState {
     pub popup: Option<PopupState>,
     /// keymap 编辑弹窗(键位列表 + 行内编辑)。
     pub keymap_popup: Option<KeymapPopupState>,
+    /// server-url 空行回车 → 转交向导引导(remote 段;tick 循环读取执行)。
+    pub want_wizard: bool,
+    /// 连接后 wifi 仍为空 → 自动弹完整引导,每次连接只弹一次;
+    /// 断开/失败后重置。
+    pub auto_wizard_done: bool,
 }
-
 
 impl DeviceState {
     pub fn new(kind: DeviceKind, demo: bool) -> Self {

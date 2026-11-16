@@ -5,9 +5,11 @@
 //! `ble::Session`(demo 无会话,落 mock);安装复用 `install::install`
 //! + 共享进度;demo 模式全程造假不碰真机。
 
+use anyhow::Context;
+
 use super::actions::scan_devices_thread;
 use super::demo;
-use super::state::{wrap_words, DownloadProgress, Input, SharedProgress};
+use super::state::{DownloadProgress, Input, SharedProgress, wrap_words};
 use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
 use crate::hostinfo::{broker_url_valid, broker_with_host, local_ips, set_vibetty_broker, tailscale_ip};
@@ -72,6 +74,8 @@ pub enum Step {
     IpPick,
     /// 17:配置完成确认页(✓ 总结,Enter 继续/结束)
     Done,
+    /// 17b:结束语 popup(按是否 remote 给文案,Ok 关闭向导)
+    Farewell,
 }
 
 /// 后台任务种类(决定任务完成后的去向)。
@@ -123,6 +127,10 @@ pub struct WizardState {
     pub log: Vec<(String, bool)>,
     /// 手表已配置完。
     pub watch_done: bool,
+    /// 自动补配会话:Done 页发现 asr 为空 → 再走一遍输入法设置。
+    pub asr_pending: bool,
+    /// 自动补配会话:输入法设置完直接回 Done,不重走安装/plugin/remote 链。
+    pub auto_session: bool,
     /// vibetty 已就绪(本来就有或本次装的)。
     pub vibetty_done: bool,
     /// 16b:vibetty config 里的原 broker(含 loopback host)与本机 IP 候选。
@@ -133,6 +141,10 @@ pub struct WizardState {
     /// plugin 询问已问过(不管答了什么)。
     pub plugin_claude_asked: bool,
     pub plugin_codex_asked: bool,
+    /// 连上设备后读到的 CONFIG 快照(表单预填现有值用)。
+    pub config: Option<serde_json::Value>,
+    /// 配置了 remote 模式(outside LAN + broker 落地):决定收尾欢迎语。
+    pub remote_done: bool,
 }
 
 impl WizardState {
@@ -164,12 +176,16 @@ impl WizardState {
             ts_ip: None,
             log: Vec::new(),
             watch_done: false,
+            asr_pending: false,
+            auto_session: false,
             vibetty_done: false,
             pending_broker: None,
             ip_choices: Vec::new(),
             history: Vec::new(),
             plugin_claude_asked: false,
             plugin_codex_asked: false,
+            config: None,
+            remote_done: false,
         }
     }
 }
@@ -245,16 +261,19 @@ fn vibetty_binary(dir: &Path) -> Option<String> {
 
 /// 读设备当前 wifi_list(真机走会话;demo/mock 直接读)。
 fn read_wifi_list(rt: &WizardRuntime) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(ble::parse_wifi_list(&read_device_config(rt)?.to_string()))
+}
+
+/// 读设备 CONFIG 快照(真机走会话;demo/mock 直接读 mock)。
+fn read_device_config(rt: &WizardRuntime) -> anyhow::Result<serde_json::Value> {
     match rt.session.as_ref() {
-        Some(s) => {
-            let cfg = s.read_config()?;
-            Ok(ble::parse_wifi_list(&serde_json::to_string(&cfg)?))
-        }
+        Some(s) => s.read_config(),
         None => {
             if rt.mock.is_null() {
                 anyhow::bail!("device not connected");
             }
-            Ok(ble::parse_wifi_list(&rt.mock.to_string()))
+            serde_json::from_str(&rt.mock.to_string())
+                .map_err(|e| anyhow::anyhow!("invalid mock config: {e}"))
         }
     }
 }
@@ -308,6 +327,13 @@ fn wiz_write_field(
     field: &str,
     value: serde_json::Value,
 ) -> anyhow::Result<()> {
+    // server_url 统一归一化(裸 host:port 自动补 mqtt://)。
+    let value = if field == "server_url" {
+        let url = value.as_str().context("server_url must be a string")?;
+        serde_json::Value::String(crate::config_cmd::normalize_broker_url(url)?)
+    } else {
+        value
+    };
     let Some(session) = rt.session.as_ref() else {
         if rt.mock.is_null() {
             anyhow::bail!("device not connected");
@@ -331,11 +357,7 @@ fn wiz_write_field(
     }
 }
 
-fn wiz_write_keymap(
-    rt: &mut WizardRuntime,
-    key: &str,
-    binding: &str,
-) -> anyhow::Result<()> {
+fn wiz_write_keymap(rt: &mut WizardRuntime, key: &str, binding: &str) -> anyhow::Result<()> {
     let Some(session) = rt.session.as_ref() else {
         if rt.mock.is_null() {
             anyhow::bail!("device not connected");
@@ -369,14 +391,20 @@ fn kick_scan(st: &mut WizardState, rt: &mut WizardRuntime) {
 }
 
 /// demo 假连接(真机走 Session::open,Ready 事件驱动)。
+/// 扫描列表的第二台 = 未配置设备:回 bare 配置,连接后自动进向导补配置。
 fn demo_connect(st: &mut WizardState, rt: &mut WizardRuntime, name: String) {
     st.connecting = Some(name);
     st.busy = Some(format!("connecting to {}", st.device.name()));
     st.job_kind = Some(JobKind::DemoConnect);
     let kind = st.device;
+    let bare = st.pick_sel == 1;
     rt.job = Some(spawn_wiz(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        WizOut::Connected(Ok(demo::sample_config(kind)))
+        WizOut::Connected(Ok(if bare {
+            demo::bare_config(kind)
+        } else {
+            demo::sample_config(kind)
+        }))
     }));
 }
 
@@ -495,7 +523,12 @@ fn vibetty_check(st: &mut WizardState, _rt: &mut WizardRuntime, dir: &Path) {
 }
 
 /// 14/14a/15:当前设备写 server-url + 主机 vibetty config 写 broker。
-fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String, vibetty_url: &str) {
+fn apply_broker(
+    st: &mut WizardState,
+    rt: &mut WizardRuntime,
+    device_url: String,
+    vibetty_url: &str,
+) {
     if let Err(e) = wiz_write_field(st, rt, "server_url", serde_json::json!(device_url)) {
         st.err = Some(format!("{e:#}"));
         return;
@@ -511,6 +544,7 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
             st.watch_done = true;
         }
         st.choice = 0;
+        mark_asr_pending(st);
         goto(st, Step::Done);
         return;
     }
@@ -523,32 +557,105 @@ fn apply_broker(st: &mut WizardState, rt: &mut WizardRuntime, device_url: String
         st.watch_done = true;
     }
     st.choice = 0;
+    mark_asr_pending(st);
     goto(st, Step::Done);
 }
 
 /// 进任何表单步骤前复位输入状态(防 field_idx/旧文本残留)。
+/// 结束语文案:按是否配置了 remote 模式给不同内容。
+fn farewell_text(st: &WizardState) -> String {
+    if st.remote_done {
+        "The keyboard and remote mode are set up. Use remote to quick-start a session. Enjoy vibe coding!"
+    } else {
+        "Keyboard mode is all set — the session colors tell you the agent status. Enjoy your vibe coding!"
+    }
+    .to_string()
+}
+
+/// 输入法设置完的去向:完整向导走安装链;自动补配会话直接回 Done,
+/// 不重走 vibekeys 安装 / plugin / remote。
+fn input_next(st: &WizardState) -> Step {
+    if st.auto_session {
+        Step::Done
+    } else {
+        Step::VibekeysApp
+    }
+}
+
+/// 设备 asr_config.uri 是否为空(无快照 / 缺字段 / 空串都算)。
+fn asr_empty(st: &WizardState) -> bool {
+    st.config
+        .as_ref()
+        .and_then(|c| c.get("asr_config"))
+        .and_then(|a| a.get("uri"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+}
+
+/// 键盘 + asr 为空 → Done 之后还要补一段输入法/ASR 设置。
+/// 只在写完 server-url 的落点前调用(正常向导和自动补配会话共用;
+/// Done 页见 asr_pending 就跳 InputMethod,设完经 input_next 回 Done)。
+fn mark_asr_pending(st: &mut WizardState) {
+    if st.device == DeviceKind::VibeKeys && asr_empty(st) {
+        st.asr_pending = true;
+    }
+}
+
 fn prep_form(st: &mut WizardState) {
     st.input = Input::default();
     st.input2 = Input::default();
     st.input3 = Input::default();
     st.field_idx = 0;
+
+    // 已连上设备:把 CONFIG 里的现有值预填进表单,方便只改一部分。
+    let Some(cfg) = &st.config else {
+        return;
+    };
+    match st.step {
+        Step::AsrApi => {
+            st.input = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "uri"]));
+            st.input2 = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "api_key"]));
+            st.input3 = Input::with_str(&super::state::cfg_get(cfg, &["asr_config", "model"]));
+        }
+        Step::BrokerInput => {
+            st.input = Input::with_str(&super::state::cfg_get(cfg, &["server_url"]));
+        }
+        Step::WifiForm => {
+            // 第一条现有 WiFi 作预填(提交 = 同 ssid 覆盖,不新增)。
+            if let Some(e) = cfg
+                .get("wifi_list")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+            {
+                st.input = Input::with_str(&super::state::cfg_get(e, &["ssid"]));
+                st.input2 = Input::with_str(&super::state::cfg_get(e, &["pass"]));
+            }
+        }
+        _ => {}
+    }
 }
 
-/// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤自动重置输入。
+/// 前进到某一步:当前步压栈,供 ⌫ 返回。表单步骤重置输入并预填现有值。
 fn goto(st: &mut WizardState, step: Step) {
     st.history.push(st.step.clone());
     st.choice = 0;
     st.err = None;
-    if matches!(
+    let is_form = matches!(
         step,
-        Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
-    ) {
+        Step::HotkeyCapture
+            | Step::AsrApi
+            | Step::WifiForm
+            | Step::TailscaleKey
+            | Step::BrokerInput
+    );
+    st.step = step;
+    if is_form {
         prep_form(st);
     }
-    st.step = step;
 }
 
-/// 返回上一步(历史栈弹出)。目标步骤的进入效果:Scan 重扫,表单重置。
+/// 返回上一步(历史栈弹出)。目标步骤的进入效果:Scan 重扫,表单重置并预填。
 fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
     let Some(prev) = st.history.pop() else {
         return;
@@ -561,11 +668,17 @@ fn back_one(st: &mut WizardState, rt: &mut WizardRuntime) {
     } else {
         if matches!(
             prev,
-            Step::HotkeyCapture | Step::AsrApi | Step::WifiForm | Step::TailscaleKey | Step::BrokerInput
+            Step::HotkeyCapture
+                | Step::AsrApi
+                | Step::WifiForm
+                | Step::TailscaleKey
+                | Step::BrokerInput
         ) {
+            st.step = prev;
             prep_form(st);
+        } else {
+            st.step = prev;
         }
-        st.step = prev;
     }
 }
 
@@ -715,12 +828,7 @@ pub fn wizard_key(
                         }
                     }
                     let n = list.len();
-                    let res = wiz_write_field(
-                        st,
-                        rt,
-                        "wifi_list",
-                        ble::wifi_list_to_json(&list),
-                    );
+                    let res = wiz_write_field(st, rt, "wifi_list", ble::wifi_list_to_json(&list));
                     match res {
                         Ok(()) => {
                             st.log_line(
@@ -754,7 +862,7 @@ pub fn wizard_key(
                             st.log_line("keyboard MIC = default (ctrl+alt)", true);
                             st.log_line("prefer_builtin_asr = off", true);
                             st.choice = 0;
-                            goto(st, Step::VibekeysApp);
+                            goto(st, input_next(st));
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
                     }
@@ -783,7 +891,7 @@ pub fn wizard_key(
                         st.log_line(format!("keyboard MIC = {binding}"), true);
                         st.log_line("prefer_builtin_asr = off", true);
                         st.choice = 0;
-                        goto(st, Step::VibekeysApp);
+                        goto(st, input_next(st));
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
                 }
@@ -792,15 +900,18 @@ pub fn wizard_key(
                 // 捕捉为组合文本(Ctrl+A);特殊键(F1/方向键/Space)也捕捉。
                 match key.code {
                     KeyCode::Char(c)
-                        if key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META) =>
+                        if key.modifiers.intersects(
+                            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META,
+                        ) =>
                     {
                         let mut combo = String::new();
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
                             combo.push_str("Ctrl+");
                         }
-                        if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META) {
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::ALT | KeyModifiers::META)
+                        {
                             combo.push_str("Alt+");
                         }
                         combo.push(c.to_ascii_uppercase());
@@ -838,15 +949,24 @@ pub fn wizard_key(
                         "api_key": api_key,
                         "model": model,
                     });
-                    let res = wiz_write_field(st, rt, "asr_config", asr).and_then(|()| {
-                        wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(true))
-                    });
+                    // 补配会话(server-url 之后的那次)只补 asr_config,
+                    // prefer_builtin_asr 保持设备原值;完整向导的 whisper
+                    // 分支才置 on。
+                    let res = if st.auto_session {
+                        wiz_write_field(st, rt, "asr_config", asr)
+                    } else {
+                        wiz_write_field(st, rt, "asr_config", asr).and_then(|()| {
+                            wiz_write_field(st, rt, "prefer_builtin_asr", serde_json::json!(true))
+                        })
+                    };
                     match res {
                         Ok(()) => {
                             st.log_line(format!("asr_config = {url}"), true);
-                            st.log_line("prefer_builtin_asr = on", true);
+                            if !st.auto_session {
+                                st.log_line("prefer_builtin_asr = on", true);
+                            }
                             st.choice = 0;
-                            goto(st, Step::VibekeysApp);
+                            goto(st, input_next(st));
                         }
                         Err(e) => st.err = Some(format!("{e:#}")),
                     }
@@ -942,6 +1062,8 @@ pub fn wizard_key(
                 if st.choice == 2 {
                     back_one(st, rt);
                 } else if st.choice == 0 {
+                    // remote 模式(outside LAN):收尾欢迎语用 remote 版文案。
+                    st.remote_done = true;
                     goto(st, Step::HasTailscale);
                 } else {
                     // 14a:局域网模式。多个候选地址就列出来让用户选
@@ -949,15 +1071,14 @@ pub fn wizard_key(
                     let ips = local_ips();
                     match ips.len() {
                         0 => {
-                            st.err = Some(
-                                "could not detect the LAN IP — is the machine online?".into(),
-                            );
+                            st.err =
+                                Some("could not detect the LAN IP — is the machine online?".into());
                         }
                         1 => {
                             apply_broker(
                                 st,
                                 rt,
-                                format!("{}:1883", ips[0]),
+                                format!("mqtt://{}:1883", ips[0]),
                                 "mqtt://127.0.0.1:1883",
                             );
                         }
@@ -1000,11 +1121,14 @@ pub fn wizard_key(
                 } else {
                     let pick = st.choice;
                     prep_form(st);
-                    goto(st, if pick == 0 {
-                        Step::TailscaleKey
-                    } else {
-                        Step::BrokerInput
-                    });
+                    goto(
+                        st,
+                        if pick == 0 {
+                            Step::TailscaleKey
+                        } else {
+                            Step::BrokerInput
+                        },
+                    );
                     // BrokerInput 的说明文字按来源区分(1 = emqx)。
                     st.choice = pick;
                 }
@@ -1023,7 +1147,12 @@ pub fn wizard_key(
                     st.ts_ip = tailscale_ip();
                     match st.ts_ip.clone() {
                         Some(ip) => {
-                            apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                            apply_broker(
+                                st,
+                                rt,
+                                format!("mqtt://{ip}:1883"),
+                                "mqtt://127.0.0.1:1883",
+                            );
                         }
                         None => st.step = Step::TailscaleIp,
                     }
@@ -1042,7 +1171,12 @@ pub fn wizard_key(
                         st.ts_ip = tailscale_ip();
                         match st.ts_ip.clone() {
                             Some(ip) => {
-                                apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                                apply_broker(
+                                    st,
+                                    rt,
+                                    format!("mqtt://{ip}:1883"),
+                                    "mqtt://127.0.0.1:1883",
+                                );
                             }
                             None => st.step = Step::TailscaleIp,
                         }
@@ -1058,7 +1192,7 @@ pub fn wizard_key(
             KeyCode::Enter | KeyCode::Char('r') => {
                 st.ts_ip = tailscale_ip();
                 if let Some(ip) = st.ts_ip.clone() {
-                    apply_broker(st, rt, format!("{ip}:1883"), "mqtt://127.0.0.1:1883");
+                    apply_broker(st, rt, format!("mqtt://{ip}:1883"), "mqtt://127.0.0.1:1883");
                 }
             }
             KeyCode::Char('e') => {
@@ -1086,16 +1220,13 @@ pub fn wizard_key(
                 let vibetty_url = "mqtt://127.0.0.1:1883";
                 match wiz_write_field(st, rt, "server_url", serde_json::json!(url)) {
                     Ok(()) => {
-                        if !st.demo {
-                            if let Err(e) = set_vibetty_broker(vibetty_url) {
-                                st.err = Some(format!("vibetty config: {e:#}"));
-                                return Outcome::none();
-                            }
+                        if !st.demo
+                            && let Err(e) = set_vibetty_broker(vibetty_url)
+                        {
+                            st.err = Some(format!("vibetty config: {e:#}"));
+                            return Outcome::none();
                         }
-                        st.log_line(
-                            format!("{} server_url = {url}", st.device.name()),
-                            true,
-                        );
+                        st.log_line(format!("{} server_url = {url}", st.device.name()), true);
                         st.log_line(format!("vibetty broker = {vibetty_url}"), true);
                         if st.device != DeviceKind::VibeKeys {
                             st.watch_done = true;
@@ -1103,6 +1234,7 @@ pub fn wizard_key(
                         st.choice = 0;
                         st.pending_broker = None;
                         st.ip_choices.clear();
+                        mark_asr_pending(st);
                         goto(st, Step::Done);
                     }
                     Err(e) => st.err = Some(format!("{e:#}")),
@@ -1129,6 +1261,22 @@ pub fn wizard_key(
 
         // 17:完成确认页。Enter 结束。
         Step::Done => {
+            if enter {
+                // broker 设置完发现 asr 还是空的 → 直接进 whisper API 设置,
+                // 设完经 input_next 回这里(只补一次)。
+                if st.asr_pending {
+                    st.asr_pending = false;
+                    st.auto_session = true;
+                    st.choice = 0;
+                    prep_form(st);
+                    goto(st, Step::AsrApi);
+                    return Outcome::none();
+                }
+                goto(st, Step::Farewell);
+            }
+        }
+        // 结束语 popup:Enter 关闭向导。
+        Step::Farewell => {
             if enter {
                 return Outcome::exit();
             }
@@ -1189,7 +1337,11 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                 st.connecting = None;
                 rt.pending_name = None;
                 match res {
-                    Ok(_) => after_connect(st),
+                    Ok(_) => {
+                        // 连上先读一遍设备 CONFIG,后续表单预填现有值。
+                        st.config = read_device_config(rt).ok();
+                        after_connect(st);
+                    }
                     Err(e) => {
                         rt.session = None;
                         st.err = Some(format!("connect failed: {e:#} — Enter to scan again"));
@@ -1223,15 +1375,16 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
                     st.pick_sel = 0;
                 }
                 Ok(_) => {
-                    st.err = Some(
-                        "no devices found — press ACCEPT on the device, then Enter".into(),
-                    );
+                    st.err =
+                        Some("no devices found — press ACCEPT on the device, then Enter".into());
                 }
                 Err(e) => st.err = Some(format!("{e:#} — Enter to scan again")),
             },
             Some(WizOut::Connected(Ok(cfg))) => {
                 st.connecting = None;
                 rt.mock = cfg; // demo:后续写入落这份假配置
+                // 读一份快照进状态,后续表单预填现有值(真机路径同款)。
+                st.config = read_device_config(rt).ok();
                 after_connect(st);
             }
             Some(WizOut::Connected(Err(e))) => {
@@ -1289,10 +1442,10 @@ pub fn poll(st: &mut WizardState, rt: &mut WizardRuntime, dir: &Path) {
         if let Ok(p) = rt.progress.lock() {
             st.progress = Some((p.downloaded, p.total));
         }
-        if let Ok(o) = rt.output.lock() {
-            if st.output != *o {
-                st.output = o.clone();
-            }
+        if let Ok(o) = rt.output.lock()
+            && st.output != *o
+        {
+            st.output = o.clone();
         }
     }
 }
@@ -1416,12 +1569,7 @@ fn step_screen(st: &WizardState) -> Screen {
         // 长错误按词折行,避免固定框宽截断。
         let mut text: Vec<Line> = wrap_words(err, 50)
             .iter()
-            .map(|l| {
-                Line::from(Span::styled(
-                    format!(" {l} "),
-                    err_style().bold(),
-                ))
-            })
+            .map(|l| Line::from(Span::styled(format!(" {l} "), err_style().bold())))
             .collect();
         if text.is_empty() {
             text.push(Line::from(""));
@@ -1472,9 +1620,7 @@ fn step_screen(st: &WizardState) -> Screen {
                         DeviceKind::VibeKeys => dim_text(
                             "not found? boot the keyboard into Keyboard mode, press ACCEPT, then wait",
                         ),
-                        _ => dim_text(
-                            "not found? put the device in provisioning mode, then wait",
-                        ),
+                        _ => dim_text("not found? put the device in provisioning mode, then wait"),
                     },
                 ];
             } else {
@@ -1485,10 +1631,8 @@ fn step_screen(st: &WizardState) -> Screen {
                     .enumerate()
                     .map(|(i, dev)| option_line(dev.name.clone(), i == st.pick_sel))
                     .collect();
-                s.body.push(option_line(
-                    "← Back".into(),
-                    st.pick_sel == st.pick.len(),
-                ));
+                s.body
+                    .push(option_line("← Back".into(), st.pick_sel == st.pick.len()));
                 s.hint = vec![hint_line("↑↓ choose · Enter connect · Esc quit")];
             }
         }
@@ -1502,8 +1646,27 @@ fn step_screen(st: &WizardState) -> Screen {
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::WifiForm => {
-            s.title = "wizard — wifi".into();
-            s.text = vec![text_line("Add a WiFi network (existing list is kept):")];
+            s.title = "wizard — wifi (2.4G)".into();
+            let existing = st
+                .config
+                .as_ref()
+                .and_then(|c| c.get("wifi_list"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("ssid").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            s.text = if existing.is_empty() {
+                vec![text_line("Add a WiFi network (existing list is kept):")]
+            } else {
+                vec![
+                    text_line("Add a WiFi network (existing list is kept):"),
+                    dim_text(&format!("on device: {existing}")),
+                ]
+            };
             s.body = vec![
                 field_line("ssid", &st.input, st.field_idx == 0),
                 field_line("password", &st.input2, st.field_idx == 1),
@@ -1529,7 +1692,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Type your IME hotkey, or press a key combo."),
                 dim_text("modifiers: ctrl · shift · alt · meta/win/super"),
                 dim_text("special: delete esc tab space enter f1-f12 home end"),
-                dim_text("combos: ctrl+x alt+f5 · \"text\" = text macro"),
+                dim_text("combos: ctrl+x alt+f5 ralt+rshift · \"text\" = text macro"),
                 dim_text("tui limits: bare ctrl/alt can't be captured — type them"),
             ];
             s.body = vec![field_line("hotkey", &st.input, true)];
@@ -1578,12 +1741,15 @@ fn step_screen(st: &WizardState) -> Screen {
                 )),
                 Line::from(""),
             ];
-            s.body.extend(choices_with_back(st, &["Yes — run the commands", "Skip"]));
+            s.body
+                .extend(choices_with_back(st, &["Yes — run the commands", "Skip"]));
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
         Step::InstallVibettyAsk => {
             s.title = "wizard — vibetty".into();
-            s.text = vec![text_line("Install vibetty (remote control for your agent)?")];
+            s.text = vec![text_line(
+                "Install vibetty (remote control for your agent)?",
+            )];
             let skip = if st.device == DeviceKind::VibeKeys {
                 "Skip — no remote control"
             } else {
@@ -1636,10 +1802,7 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![
                 field_line("auth-key", &st.input, st.choice == 0),
-                option_line(
-                    "Skip — already set up on the device".into(),
-                    st.choice == 1,
-                ),
+                option_line("Skip — already set up on the device".into(), st.choice == 1),
             ];
             s.hint = vec![hint_line("↑↓ choose · Enter confirm · Esc quit")];
         }
@@ -1654,9 +1817,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 .ip_choices
                 .iter()
                 .enumerate()
-                .map(|(i, ip)| {
-                    option_line(broker_with_host(&base, ip), i == st.choice)
-                })
+                .map(|(i, ip)| option_line(broker_with_host(&base, ip), i == st.choice))
                 .collect();
             s.body.push(option_line(
                 "← Back".into(),
@@ -1672,9 +1833,7 @@ fn step_screen(st: &WizardState) -> Screen {
                 text_line("Install tailscale and run `tailscale up`, then:"),
             ];
             s.body = vec![];
-            s.hint = vec![
-                hint_line("Enter/r retry · e broker · Esc quit"),
-            ];
+            s.hint = vec![hint_line("Enter/r retry · e broker · Esc quit")];
         }
         Step::BrokerInput => {
             s.title = "wizard — broker address".into();
@@ -1708,7 +1867,24 @@ fn step_screen(st: &WizardState) -> Screen {
                     .collect();
             }
             s.body = choices(st, &["Continue"]);
-            s.hint = vec![hint_line("Enter finish")];
+            s.hint = vec![hint_line(if st.asr_pending {
+                "Enter continue — whisper setup is next"
+            } else {
+                "Enter continue"
+            })];
+        }
+        Step::Farewell => {
+            s.title = "wizard — all set".into();
+            // 按固定宽度折行:不折的话长句在弹窗里会被截断。
+            s.text = vec![Line::from("")];
+            for l in wrap_words(&farewell_text(st), 42) {
+                s.text.push(Line::from(Span::styled(
+                    l,
+                    Style::new().green().add_modifier(Modifier::BOLD),
+                )));
+            }
+            s.body = choices(st, &["Ok"]);
+            s.hint = vec![hint_line("Enter close")];
         }
     }
     s
@@ -1749,7 +1925,10 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
             .max()
             .unwrap_or(20) as u16
             + 4;
-        let w = W_TEXT.max(content_w).clamp(40, 100).min(area.width.saturating_sub(2));
+        let w = W_TEXT
+            .max(content_w)
+            .clamp(40, 100)
+            .min(area.width.saturating_sub(2));
         let h_text = H_TEXT_INNER.max(scr.text.len() as u16) + 2;
         let h_body = if has_body {
             scr.body.len() as u16 + 2
@@ -1761,14 +1940,38 @@ impl ratatui_kit::ratatui::widgets::Widget for &WizardScreen {
         let gap = 0u16; // 三框边框紧贴,中间不空行
         let total = h_text + gap + h_body + gap + h_hint;
         if total > area.height {
-            return; // 终端太矮:宁可空白也不画残框
+            // 终端太矮:不画残框,给一行居中提示。
+            let msg = format!(
+                "terminal too small — need {} rows × {} cols, have {} × {}",
+                total, w, area.height, area.width
+            );
+            let x = area.x + (area.width.saturating_sub(msg.chars().count() as u16)) / 2;
+            let y = area.y + area.height / 2;
+            buf.set_string(
+                x.min(area.x + area.width.saturating_sub(1)),
+                y.min(area.y + area.height.saturating_sub(1)),
+                &msg,
+                Style::new().red(),
+            );
+            return;
         }
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(total)) / 2;
 
         // 说明框(title 框)。
-        let rect1 = Rect { x, y, width: w, height: h_text };
-        draw_box(rect1, &format!(" {} ", scr.title), &scr.text, scr.alert, buf);
+        let rect1 = Rect {
+            x,
+            y,
+            width: w,
+            height: h_text,
+        };
+        draw_box(
+            rect1,
+            &format!(" {} ", scr.title),
+            &scr.text,
+            scr.alert,
+            buf,
+        );
 
         // 操作框(选项/输入)。
         if has_body {
@@ -1802,8 +2005,7 @@ fn draw_box(
     buf: &mut ratatui_kit::ratatui::buffer::Buffer,
 ) {
     let border_style = if alert { err_style() } else { Style::new() };
-    let mut block = ratatui_kit::ratatui::widgets::Block::bordered()
-        .border_style(border_style);
+    let mut block = ratatui_kit::ratatui::widgets::Block::bordered().border_style(border_style);
     if !title.is_empty() {
         block = block.title(Span::styled(
             title.to_string(),
@@ -1876,10 +2078,13 @@ pub fn WizardApp(props: &WizardAppProps, mut hooks: Hooks) -> impl Into<AnyEleme
     }
 
     let st = state.read().clone();
-    let screen = WizardScreen { screen: step_screen(&st) };
+    let screen = WizardScreen {
+        screen: step_screen(&st),
+    };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(screen)
-    }).into();
+    })
+    .into();
     el
 }
 
@@ -1907,10 +2112,13 @@ fn is_new_user_in(dir: &Path, home: &Path) -> bool {
 
 /// 渲染当前向导画面(嵌入 TUI 标签页模式时用;独立 WizardApp 也走这里)。
 pub fn view(st: &WizardState) -> AnyElement<'static> {
-    let screen = WizardScreen { screen: step_screen(st) };
+    let screen = WizardScreen {
+        screen: step_screen(st),
+    };
     let el: AnyElement<'static> = element!(View(height: Constraint::Fill(1)) {
         widget(screen)
-    }).into();
+    })
+    .into();
     el
 }
 

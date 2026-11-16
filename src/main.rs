@@ -4,13 +4,21 @@
 //! installs them as `<bin>-<version>` + symlink (matches each repo's
 //! install.sh convention).
 
+mod autoshare;
 mod ble;
 mod config_cmd;
 mod hostinfo;
 mod install;
 mod pkg;
 mod plugins;
+/// herdr 集成是 unix(macOS/Linux)专属;Windows 的 Share 页只提供
+/// 「新终端跑 vibetty」,不检测 herdr。
+#[cfg(unix)]
+mod share_manager;
 mod status;
+// 临时:调用方(Share 页动作)接线前未使用,接线后撤掉。
+#[allow(dead_code)]
+mod terminal;
 mod tui;
 mod webui;
 
@@ -44,6 +52,9 @@ Binding forms:
   name      one of the key names below, e.g. delete, esc, f5
   Mod+Key   key combo, e.g. Ctrl+C, Alt+Delete, Ctrl+Shift+T
             modifiers: ctrl alt shift option win cmd gui meta
+            right-side: rctrl rshift ralt roption rgui rwin rmeta rsupper
+            (RAlt alone = right Alt key; RAlt+F5 needs firmware >= the
+            r-modifier match support — the key name itself works now)
 
 Key names (case-insensitive):
   enter, return              Enter
@@ -104,7 +115,9 @@ enum Cmd {
         #[arg(long)]
         pre: bool,
     },
-    /// Uninstall a package (removes entry point and all versioned files)
+    /// Uninstall a package (removes entry point and all versioned files);
+    /// "self" = vibeup itself, "all" = vibekeys + vibetty + vibeup (plus the
+    /// vibekeys agent plugins and the vibetty herdr plugin)
     Uninstall { name: String },
     /// Configure devices over BLE (VibeKeys keyboard / VibeWatch)
     Config {
@@ -120,6 +133,14 @@ enum Cmd {
         /// Base URL of the hosted setup page to pair with
         #[arg(long, default_value = "https://second-state.github.io/vibeup/webui/")]
         pages_url: String,
+    },
+    /// Auto-share every herdr agent to vibetty (background daemon; macOS/Linux only)
+    Autoshare {
+        /// Run detached as a background daemon (logs to ~/.vibetty/logs/)
+        #[arg(short = 'd', long)]
+        detach: bool,
+        #[command(subcommand)]
+        cmd: Option<autoshare::AutoshareCmd>,
     },
 }
 
@@ -229,8 +250,17 @@ fn main() -> Result<()> {
         }
         Cmd::Update { name, pre } => update(name.as_deref(), pre, &cli.dir, cli.dry_run),
         Cmd::Uninstall { name } => {
-            let p = if name == "self" { &pkg::SELF } else { pkg::find(&name)? };
-            let log = install::uninstall(p, &pkg::install_dir(cli.dir.as_deref()), cli.dry_run)?;
+            let dir = pkg::install_dir(cli.dir.as_deref());
+            let log = if name == "all" {
+                install::uninstall_all(&dir, cli.dry_run)?
+            } else {
+                let p = if name == "self" {
+                    &pkg::SELF
+                } else {
+                    pkg::find(&name)?
+                };
+                install::uninstall(p, &dir, cli.dry_run)?
+            };
             print!("{log}");
             Ok(())
         }
@@ -238,15 +268,15 @@ fn main() -> Result<()> {
         Cmd::Webui { port, pages_url } => {
             webui::run(cli.dir, cli.dry_run, port, &pages_url)
         }
+        Cmd::Autoshare { detach, cmd } => autoshare::dispatch(detach, cmd, cli.dry_run),
     }
 }
 
 fn run_config(cmd: ConfigCmd, dry_run: bool) -> Result<()> {
     use config_cmd::{AsrOpts, WifiAction};
     // CLI direct connect: no specific device, connect to first of the scanned kind.
-    let parse_device = |s: &str| -> Result<ble::Target> {
-        Ok(ble::Target::auto(ble::DeviceKind::parse(s)?))
-    };
+    let parse_device =
+        |s: &str| -> Result<ble::Target> { Ok(ble::Target::auto(ble::DeviceKind::parse(s)?)) };
     match cmd {
         ConfigCmd::Show { device } => config_cmd::show(parse_device(&device)?),
         ConfigCmd::Wifi { device, cmd } => {
