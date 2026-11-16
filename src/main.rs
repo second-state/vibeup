@@ -265,9 +265,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Config { cmd } => run_config(cmd, cli.dry_run),
-        Cmd::Webui { port, pages_url } => {
-            webui::run(cli.dir, cli.dry_run, port, &pages_url)
-        }
+        Cmd::Webui { port, pages_url } => webui::run(cli.dir, cli.dry_run, port, &pages_url),
         Cmd::Autoshare { detach, cmd } => autoshare::dispatch(detach, cmd, cli.dry_run),
     }
 }

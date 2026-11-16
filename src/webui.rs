@@ -7,19 +7,21 @@
 //! 安全:仅监听 127.0.0.1;启动生成一次性 token,首帧 `hello` 校验,
 //! 防任意网页驱动安装。单客户端接替制:新连接顶掉旧连接(刷新友好)。
 
-use crate::hostinfo::{broker_url_valid, local_ips, set_vibetty_broker, tailscale_ip, vibetty_broker};
+use crate::hostinfo::{
+    broker_url_valid, local_ips, set_vibetty_broker, tailscale_ip, vibetty_broker,
+};
 use crate::install;
 use crate::pkg::{self, Pkg};
-use crate::plugins::{cli_on_path, install_plugin_to, SharedLines};
+use crate::plugins::{SharedLines, cli_on_path, install_plugin_to};
 use crate::status;
 use anyhow::{Context, Result};
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,7 +65,11 @@ pub(crate) fn run(
 
         let pages = pages_url.trim_end_matches('/');
         println!("vibeup webui — local setup server");
-        println!("  pairing URL : {pages}?port={}&token={}", addr.port(), state.token);
+        println!(
+            "  pairing URL : {pages}?port={}&token={}",
+            addr.port(),
+            state.token
+        );
         println!("  raw endpoint: ws://127.0.0.1:{}/ws", addr.port());
         println!("  Ctrl-C to stop.");
 
@@ -147,7 +153,11 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
     let writer = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             let superseded = frame.get("event").and_then(|e| e.as_str()) == Some("superseded");
-            if ws_tx.send(Message::Text(frame.to_string().into())).await.is_err() {
+            if ws_tx
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .is_err()
+            {
                 break;
             }
             if superseded {
@@ -175,9 +185,23 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             }
         };
         let id = cmd.get("id").and_then(|v| v.as_str()).map(String::from);
-        let name = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        println!("→ {} {}", name, cmd.get("params").map(|p| p.to_string()).unwrap_or_default());
-        dispatch(state.clone(), tx.clone(), id, name, cmd.get("params").cloned().unwrap_or(json!({})));
+        let name = cmd
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        println!(
+            "→ {} {}",
+            name,
+            cmd.get("params").map(|p| p.to_string()).unwrap_or_default()
+        );
+        dispatch(
+            state.clone(),
+            tx.clone(),
+            id,
+            name,
+            cmd.get("params").cloned().unwrap_or(json!({})),
+        );
     }
     // reader 结束(页面断开):让出 writer 收尾。
     let _ = writer.await;
@@ -242,9 +266,18 @@ fn dispatch(state: AppState, tx: EventTx, id: Option<String>, cmd: String, param
             "result": {"broker": vibetty_broker()},
         })),
         "vibetty.setBroker" => {
-            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !broker_url_valid(&url) {
-                send!(resp(id.as_deref(), false, "bad_request", "not a valid broker URL — mqtt:// mqtts:// ws:// or wss:// with a host"));
+                send!(resp(
+                    id.as_deref(),
+                    false,
+                    "bad_request",
+                    "not a valid broker URL — mqtt:// mqtts:// ws:// or wss:// with a host"
+                ));
                 return;
             }
             match set_vibetty_broker(&url) {
@@ -252,7 +285,12 @@ fn dispatch(state: AppState, tx: EventTx, id: Option<String>, cmd: String, param
                     "type": "resp", "id": id, "ok": true,
                     "result": {"broker": url},
                 })),
-                Err(e) => send!(resp(id.as_deref(), false, "internal", &format!("vibetty config: {e:#}"))),
+                Err(e) => send!(resp(
+                    id.as_deref(),
+                    false,
+                    "internal",
+                    &format!("vibetty config: {e:#}")
+                )),
             }
         }
         "keymap.build" => {
@@ -260,7 +298,12 @@ fn dispatch(state: AppState, tx: EventTx, id: Option<String>, cmd: String, param
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("MIC");
             let binding = params.get("binding").and_then(|v| v.as_str()).unwrap_or("");
             if binding.is_empty() {
-                send!(resp(id.as_deref(), false, "bad_request", "binding must not be empty"));
+                send!(resp(
+                    id.as_deref(),
+                    false,
+                    "bad_request",
+                    "binding must not be empty"
+                ));
                 return;
             }
             send!(json!({
@@ -283,7 +326,12 @@ fn dispatch(state: AppState, tx: EventTx, id: Option<String>, cmd: String, param
         }
         "status.get" | "pkg.install" | "pkg.uninstall" | "pkg.installScript" | "plugin.install" => {
             if state.busy.swap(true, Ordering::SeqCst) {
-                send!(resp(id.as_deref(), false, "busy", "another operation is still running"));
+                send!(resp(
+                    id.as_deref(),
+                    false,
+                    "busy",
+                    "another operation is still running"
+                ));
                 return;
             }
             let state2 = state.clone();
@@ -346,8 +394,7 @@ async fn run_long_op(
                                 "id": id3, "data": {"downloaded": d, "total": t},
                             }));
                         };
-                        let mut log =
-                            install::install(p, tag, pre, &dir2, dry, false, &tick)?;
+                        let mut log = install::install(p, tag, pre, &dir2, dry, false, &tick)?;
                         // vibekeys 装完跑 install-script(jump 脚本),demo/dry-run 不跑。
                         if p.name == "vibekeys" && !dry {
                             let bin = dir2.join(p.link_name());
