@@ -311,6 +311,16 @@ fn dispatch(state: AppState, tx: EventTx, id: Option<String>, cmd: String, param
                 "result": {"payload": crate::config_cmd::build_keymap_config(key, binding)},
             }));
         }
+        "pkg.installed" => {
+            // 纯本地检查(不查网络/不占 busy):跳过逻辑要稳,不能依赖 status.get
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let dir = pkg::install_dir(state.dir.as_deref());
+            let v = pkg::find(name).ok().and_then(|p| pkg::installed_version(p, &dir));
+            send!(json!({
+                "type": "resp", "id": id, "ok": true,
+                "result": {"name": name, "installed": v},
+            }));
+        }
         "plugins.detect" => send!(json!({
             "type": "resp", "id": id, "ok": true,
             "result": {"claude": cli_on_path("claude"), "codex": cli_on_path("codex")},

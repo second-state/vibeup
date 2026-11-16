@@ -41,7 +41,7 @@
             <li class="step" data-s="whisper">ASR</li>
             <li class="step" data-s="vibekeys">vibekeys</li>
             <li class="step" data-s="plugins">Plugins</li>
-            <li class="step" data-s="vibetty">vibetty</li>
+            <li class="step" data-s="vibetty">Remote</li>
             <li class="step" data-s="broker">Broker</li>
             <li class="step" data-s="done">Done</li>
         </ul>
@@ -91,10 +91,6 @@
                     </div>
                     <button class="btn btn-primary" id="blePairBtn">Pair device…</button>
                     <div id="bleStatus" class="text-sm"></div>
-                    <div id="snapshotBox" class="hidden">
-                        <div class="text-sm font-semibold mb-1">Current device config</div>
-                        <pre id="snapshotPre" class="bg-base-200 rounded p-3 text-xs overflow-x-auto max-h-64"></pre>
-                    </div>
                     <div id="pairHint" class="text-xs opacity-70 hidden"></div>
                     <div class="flex gap-2">
                         <button class="btn btn-ghost" id="pairBack">← Back</button>
@@ -226,13 +222,13 @@
                     <div id="pluginsErr" class="text-error text-sm"></div>
                     <div class="flex gap-2">
                         <button class="btn btn-ghost" id="pluginsSkip">Skip</button>
-                        <button class="btn btn-primary flex-1 hidden" id="pluginsNext">Next: vibetty</button>
+                        <button class="btn btn-primary flex-1 hidden" id="pluginsNext">Next: remote control</button>
                     </div>
                 </section>
 
                 <!-- ===== 步骤 10:vibetty ===== -->
                 <section data-panel="vibetty" class="hidden space-y-4">
-                    <h2 class="card-title text-xl">10 · vibetty</h2>
+                    <h2 class="card-title text-xl">10 · Remote control</h2>
                     <p class="text-sm opacity-70">Remote control for your agent — drive Claude Code / Codex from the
                         watch (or the keyboard's screen).</p>
                     <div id="vibettyStatus" class="text-sm opacity-70"></div>
@@ -288,8 +284,10 @@
                         </ol>
                         <input type="text" id="tsKeyInput" placeholder="tskey-auth-…" class="input input-bordered w-full font-mono">
                         <div id="tsKeyErr" class="text-error text-sm"></div>
-                        <button class="btn btn-primary" id="tsKeySave">Bind Tailscale to device</button>
-                        <button class="btn btn-outline" id="tsKeyBound">Already bound on this device — skip</button>
+                        <div class="flex flex-wrap gap-2">
+                            <button class="btn btn-primary flex-1" id="tsKeySave">Bind Tailscale to device</button>
+                            <button class="btn btn-outline flex-1" id="tsKeyBound">Already bound on this device — skip</button>
+                        </div>
                     </div>
 
                     <!-- 11e:tailscale ip(查不到时重试;查到给 tailscale/LAN 双出口)-->
@@ -347,8 +345,8 @@
             </div>
         </div>
 
-        <!-- 总结日志(全程追加,done 页复用)-->
-        <div class="card bg-base-100 shadow-xl mt-6">
+        <!-- 总结日志(全程追加;done 页有自己的清单,届时隐藏这张卡)-->
+        <div id="summaryCard" class="card bg-base-100 shadow-xl mt-6">
             <div class="card-body">
                 <h3 class="card-title text-base">Summary</h3>
                 <ul id="summaryList" class="text-sm space-y-1"></ul>
@@ -436,6 +434,8 @@
                 li.className = l.ok ? 'text-success' : 'text-error';
                 ul.appendChild(li);
             }
+            // done 页有自己的清单,底部 Summary 卡重复,隐藏
+            $('summaryCard').classList.toggle('hidden', S.current === 'done');
             renderDone();
         }
 
@@ -645,14 +645,11 @@
             }
         }
 
-        // CONFIG READ = 整份 JSON 快照
+        // CONFIG READ = 整份 JSON 快照(只留内部状态,不往页面上渲染原始 JSON)
         async function readSnapshot() {
             if (!S.chars.config) throw new Error('device not connected');
             const v = await S.chars.config.readValue();
             S.snapshot = JSON.parse(new TextDecoder().decode(v));
-            const pre = $('snapshotPre');
-            pre.textContent = JSON.stringify(S.snapshot, null, 2);
-            $('snapshotBox').classList.remove('hidden');
             S.wifiList = (S.snapshot.wifi_list || []).map((c) => ({ ssid: c.ssid || '', pass: c.pass || '' }));
             return S.snapshot;
         }
@@ -710,6 +707,9 @@
             document.querySelectorAll('[data-panel]').forEach((p) => {
                 p.classList.toggle('hidden', p.dataset.panel !== name);
             });
+            // done 页隐藏底部 Summary 卡(清单已在 done 面板里)
+            const sc = $('summaryCard');
+            if (sc) sc.classList.toggle('hidden', name === 'done');
             const idx = ORDER.indexOf(name);
             document.querySelectorAll('#stepper .step').forEach((li) => {
                 const i = ORDER.indexOf(li.dataset.s);
@@ -1264,14 +1264,15 @@
         const vibettyUi = makeProgressUi('vibettyBar', 'vibettyPct', 'vibettyLog');
 
         async function onEnterVibetty() {
-            // TUI vibetty_check 同款:已装且不落后 → 不打扰,直接进 broker。
-            let p = null;
+            // TUI vibetty_check 同款:二进制在 → 不打扰,直接进 broker。
+            // 用纯本地的 pkg.installed,不依赖 status.get(要查网络,还会撞 busy 锁)
+            let installed = null;
             try {
-                const r = await cmd('status.get');
-                p = (r.packages || []).find((x) => x.name === 'vibetty');
+                const r = await cmd('pkg.installed', { name: 'vibetty' });
+                installed = r.installed;
             } catch (_) { /* 查不到就按未装处理,显示安装页 */ }
-            if (p && p.installed && !p.updateAvailable) {
-                logLine('vibetty ' + p.installed + ' already installed (up to date) — skipping', true);
+            if (installed) {
+                logLine('vibetty ' + installed + ' already installed — skipping', true);
                 gotoStep('broker');
                 return;
             }
