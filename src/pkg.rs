@@ -49,6 +49,7 @@ impl Pkg {
     pub fn asset(&self) -> Result<String> {
         match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => Ok(format!("{}-linux-x64", self.bin)),
+            ("linux", "aarch64") => Ok(format!("{}-linux-arm64", self.bin)),
             ("macos", "aarch64") => Ok(format!("{}-macos-arm64", self.bin)),
             ("windows", "x86_64") => Ok(format!("{}-windows-x64.exe", self.bin)),
             (os, arch) => bail!(
