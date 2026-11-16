@@ -1,6 +1,6 @@
 [package]
 name = "vibeup"
-version = "0.2.1-rc.15"
+version = "0.2.1-rc.16"
 edition = "2024"
 
 [dependencies]
