@@ -11,6 +11,19 @@ use std::sync::{Arc, Mutex};
 /// 后台任务输出行(实时流,UI 每 100ms 快照一次)。
 pub(crate) type SharedLines = Arc<Mutex<Vec<String>>>;
 
+/// agent plugin 的两个固定参数(marketplace 名、插件 id)。唯一的真相源:
+/// 安装(TUI 包页阻塞版 / wizard·webui 流式版)、卸载、补救文案全部引用这里,
+/// 改一次全跟着变。
+pub(crate) const PLUGIN_MARKETPLACE: &str = "second-state/marketplace";
+pub(crate) const PLUGIN_ID: &str = "vibekeys@second-state-tools";
+
+/// 装失败的补救提示(两个安装入口共用同一份文案)。
+pub(crate) fn plugin_install_failed(label: &str, cli: &str, action: &str) -> String {
+    format!(
+        "{label} plugin install failed — later: `{cli} plugin marketplace add {PLUGIN_MARKETPLACE}` + `{cli} plugin {action} {PLUGIN_ID}`"
+    )
+}
+
 /// 正在跑的 plugin 安装子进程 PID(网络卡死时的中断逃生通道)。
 static ACTIVE_PLUGIN_PID: Mutex<Option<u32>> = Mutex::new(None);
 
@@ -52,7 +65,10 @@ pub(crate) fn push_line(sink: &SharedLines, line: &str) {
         return;
     }
     let mut g = sink.lock().unwrap();
-    g.push(format!("  │ {}", clean.chars().take(90).collect::<String>()));
+    g.push(format!(
+        "  │ {}",
+        clean.chars().take(90).collect::<String>()
+    ));
     let len = g.len();
     if len > 80 {
         g.drain(..len - 80);
@@ -126,7 +142,10 @@ pub(crate) fn stream_cmd_to(cli: &str, args: &[&str], sink: &SharedLines, raw: b
         Ok(s) if s.success() => true,
         Ok(s) => {
             if raw {
-                push_raw(sink, &format!("\x1b[31m✗ exit {}\x1b[0m", s.code().unwrap_or(-1)));
+                push_raw(
+                    sink,
+                    &format!("\x1b[31m✗ exit {}\x1b[0m", s.code().unwrap_or(-1)),
+                );
             } else {
                 push_line(sink, &format!("  ✗ exit {}", s.code().unwrap_or(-1)));
             }
@@ -174,17 +193,15 @@ pub(crate) fn install_plugin_to(
 ) -> String {
     let ok1 = stream_cmd_to(
         cli,
-        &["plugin", "marketplace", "add", "second-state/marketplace"],
+        &["plugin", "marketplace", "add", PLUGIN_MARKETPLACE],
         sink,
         raw,
     );
-    let ok2 = stream_cmd_to(cli, &["plugin", action, "vibekeys@second-state-tools"], sink, raw);
+    let ok2 = stream_cmd_to(cli, &["plugin", action, PLUGIN_ID], sink, raw);
     if ok1 && ok2 {
         format!("{label} plugin installed")
     } else {
-        format!(
-            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-        )
+        plugin_install_failed(label, cli, action)
     }
 }
 
@@ -200,14 +217,17 @@ pub(crate) fn demo_install_plugin(label: &str, sink: &SharedLines) -> String {
 }
 
 /// demo:Codex plugin 固定失败,方便测试失败 → 重试/跳过/Esc 返回的流程。
-pub(crate) fn demo_install_codex_fails(cli: &str, action: &str, label: &str, sink: &SharedLines) -> String {
+pub(crate) fn demo_install_codex_fails(
+    cli: &str,
+    action: &str,
+    label: &str,
+    sink: &SharedLines,
+) -> String {
     push_line(sink, "(demo) adding marketplace…");
     std::thread::sleep(std::time::Duration::from_millis(500));
     push_line(sink, "(demo) marketplace added");
     std::thread::sleep(std::time::Duration::from_millis(500));
     push_line(sink, "(demo) plugin install failed");
     std::thread::sleep(std::time::Duration::from_millis(400));
-    format!(
-        "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-    )
+    plugin_install_failed(label, cli, action)
 }

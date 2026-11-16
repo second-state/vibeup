@@ -355,11 +355,11 @@ fn uninstall_agent_plugins(dry_run: bool) -> String {
     let mut out = String::new();
     out.push_str(&cli_uninstall(
         "claude",
-        &["plugin", "uninstall", "vibekeys@second-state-tools"],
+        &["plugin", "uninstall", crate::plugins::PLUGIN_ID],
     ));
     out.push_str(&cli_uninstall(
         "codex",
-        &["plugin", "remove", "vibekeys@second-state-tools"],
+        &["plugin", "remove", crate::plugins::PLUGIN_ID],
     ));
     out
 }

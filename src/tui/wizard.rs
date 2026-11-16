@@ -12,11 +12,13 @@ use super::demo;
 use super::state::{DownloadProgress, Input, SharedProgress, wrap_words};
 use crate::ble::{self, DeviceKind, FoundDevice, Target};
 use crate::config_cmd::build_keymap_config;
-use crate::hostinfo::{broker_url_valid, broker_with_host, local_ips, set_vibetty_broker, tailscale_ip};
+use crate::hostinfo::{
+    broker_url_valid, broker_with_host, local_ips, set_vibetty_broker, tailscale_ip,
+};
 use crate::install;
 use crate::pkg;
 use crate::plugins::{
-    cli_on_path, demo_install_codex_fails, demo_install_plugin, install_plugin, SharedLines,
+    SharedLines, cli_on_path, demo_install_codex_fails, demo_install_plugin, install_plugin,
 };
 
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1734,10 +1736,12 @@ fn step_screen(st: &WizardState) -> Screen {
             ];
             s.body = vec![
                 dim_text(&format!(
-                    "  $ {cli} plugin marketplace add second-state/marketplace"
+                    "  $ {cli} plugin marketplace add {}",
+                    crate::plugins::PLUGIN_MARKETPLACE
                 )),
                 dim_text(&format!(
-                    "  $ {cli} plugin {action} vibekeys@second-state-tools"
+                    "  $ {cli} plugin {action} {}",
+                    crate::plugins::PLUGIN_ID
                 )),
                 Line::from(""),
             ];

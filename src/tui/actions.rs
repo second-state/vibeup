@@ -216,19 +216,19 @@ fn start_plugin_install(
 /// 装 (cli, label) 的 agent plugin:marketplace add + plugin install。
 /// 返回总结行(footer 显示)。
 fn install_plugin_cli(cli: &str, action: &str, label: &str) -> String {
+    // 阻塞版入口(包页后台线程用);命令串与失败文案走 plugins.rs 的唯一真相源。
+    use crate::plugins::{PLUGIN_ID, PLUGIN_MARKETPLACE, plugin_install_failed};
     let mkt = std::process::Command::new(cli)
-        .args(["plugin", "marketplace", "add", "second-state/marketplace"])
+        .args(["plugin", "marketplace", "add", PLUGIN_MARKETPLACE])
         .output();
     let inst = std::process::Command::new(cli)
-        .args(["plugin", action, "vibekeys@second-state-tools"])
+        .args(["plugin", action, PLUGIN_ID])
         .output();
     match (mkt, inst) {
         (Ok(a), Ok(b)) if a.status.success() && b.status.success() => {
             format!("{label} plugin installed")
         }
-        _ => format!(
-            "{label} plugin install failed — later: `{cli} plugin marketplace add second-state/marketplace` + `{cli} plugin {action} vibekeys@second-state-tools`"
-        ),
+        _ => plugin_install_failed(label, cli, action),
     }
 }
 
